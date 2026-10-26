@@ -27,6 +27,12 @@ from app.db.models import (
     ExtractionJob,
 )
 from app.documents.service import assert_transition
+from app.documents.state import (
+    LIFECYCLE_ARCHIVED,
+    lifecycle_of,
+    processing_of,
+    set_processing_status,
+)
 from app.documents.storage import get_storage_client
 
 # 每份文档保留的草稿版本数（含最新）。
@@ -92,6 +98,9 @@ def build_pages(document: Document, content: bytes) -> List[PageAsset]:
     """构建分页资产：PDF→pypdf 文本（页图在解析阶段按需渲染）；
     图片→Pillow 归一化（EXIF 方向）单页。"""
     pages: List[PageAsset] = []
+    if document.kind == "TEXT":
+        # R1 T105：纯文本文件直接取文本，无需 OCR
+        return _build_text_pages(content)
     if document.kind == "PDF":
         import io
 
@@ -131,6 +140,45 @@ def build_pages(document: Document, content: bytes) -> List[PageAsset]:
             "mime": document.mime_type,
         }
     )
+    return pages
+
+
+def _build_text_pages(content: bytes) -> List[PageAsset]:
+    """纯文本文件 → 页（R1 T105）。
+
+    按空行分页（每 2000 字符一页），保留原文顺序。
+    文本文件没有页码概念，用逻辑页号便于后续锚点定位。
+    """
+    from app.documents.service import decode_text
+
+    text, _encoding = decode_text(content)
+    if not text:
+        return [{"page_no": 1, "text": "", "image_bytes": None, "mime": None}]
+    # 段落切分：空行分段，再按长度合并到逻辑页
+    paragraphs = [p for p in text.split("\n\n") if p.strip()]
+    if not paragraphs:
+        paragraphs = [text]
+    pages: List[PageAsset] = []
+    current: List[str] = []
+    size = 0
+    for para in paragraphs:
+        if current and size + len(para) > 2000:
+            pages.append({
+                "page_no": len(pages) + 1,
+                "text": "\n\n".join(current),
+                "image_bytes": None,
+                "mime": None,
+            })
+            current, size = [], 0
+        current.append(para)
+        size += len(para)
+    if current:
+        pages.append({
+            "page_no": len(pages) + 1,
+            "text": "\n\n".join(current),
+            "image_bytes": None,
+            "mime": None,
+        })
     return pages
 
 
@@ -218,28 +266,36 @@ def process_job(db: Session, job_id: str) -> None:
         db.commit()
         return
 
+    # 软删文档（档案删除/重复上传顶替）不再处理：不得生成新草稿、不得改写状态
+    if document.deleted_at is not None:
+        job.state = "cancelled"
+        job.stage = "cancelled"
+        job.finished_at = datetime.now(timezone.utc)
+        db.commit()
+        return
+
     # 归档/已确认的文档不再处理
-    if document.status in ("archived", "confirmed"):
+    if document.status in ("archived", "confirmed") or lifecycle_of(document) == LIFECYCLE_ARCHIVED:
         job.state = "cancelled"
         db.commit()
         return
 
-    # pending（首次）/ extracting（重新抽取已提前置位）/ awaiting_review、parsed_no_data、
-    # failed（重新抽取）→ 继续处理
-    if document.status not in (
-        "pending", "extracting", "awaiting_review", "parsed_no_data", "failed",
+    # pending（首次）/ processing（重新抽取已提前置位）/ awaiting_review / processed(无数据)
+    # / failed（重新抽取）→ 继续处理
+    current_processing = processing_of(document)
+    if current_processing not in (
+        "pending", "processing", "awaiting_review", "processed", "failed",
     ):
-        logger.warning("pipeline.skip doc=%s status=%s", document.id, document.status)
+        logger.warning("pipeline.skip doc=%s status=%s", document.id, current_processing)
         job.state = "cancelled"
-        job.error = f"document status={document.status}"
+        job.error = f"document status={current_processing}"
         db.commit()
         return
-    if document.status == "extracting" and job.state == "queued":
-        # 重新抽取：状态已提前置为 extracting，这里只需把 job 置 running
+    if current_processing == "processing" and job.state == "queued":
+        # 重新抽取：状态已提前置为 processing，这里只需把 job 置 running
         pass
-    elif document.status != "extracting":
-        assert_transition(document.status, "extracting")
-        document.status = "extracting"
+    else:
+        set_processing_status(document, "processing")
     job.state = "running"
     job.started_at = datetime.now(timezone.utc)
     job.worker_id = f"{socket.gethostname()}:{os.getpid()}"
@@ -534,9 +590,8 @@ def process_job(db: Session, job_id: str) -> None:
 
     has_content = bool(payload["events"] or payload["observations"])
     if not has_content:
-        # 已解析但无事件（§9.2 parsed_no_data）
-        assert_transition(document.status, "parsed_no_data")
-        document.status = "parsed_no_data"
+        # 已解析但无事件（§9.2 parsed_no_data → processed/no_data）
+        set_processing_status(document, "processed", content_status="no_data")
         job.state = "succeeded"
         job.parser = result["parser_name"]
         job.stage = "done"
@@ -571,14 +626,17 @@ def process_job(db: Session, job_id: str) -> None:
     )
     db.add(dr)
 
-    assert_transition(document.status, "awaiting_review")
-    document.status = "awaiting_review"
+    set_processing_status(document, "awaiting_review")
     job.state = "succeeded"
     job.parser = result["parser_name"]
     job.stage = "done"
     job.progress_done = job.progress_total = int(result.get("page_count") or len(pages))
     job.finished_at = datetime.now(timezone.utc)
     db.flush()
+
+    # ---- R1 T103/T104：来源锚点 + 版本化 Markdown 副本 ----
+    _store_anchors_and_markdown(db, document, pages, payload, dr.version)
+
     # 清理过旧版本（保留最近 N 版，已确认版不删），防止反复重抽无限堆积
     pruned = prune_derived_records(db, document.id)
     if pruned:
@@ -598,11 +656,100 @@ def process_job(db: Session, job_id: str) -> None:
     )
 
 
+def _store_anchors_and_markdown(
+    db: Session,
+    document: Document,
+    pages: List[PageAsset],
+    payload: dict,
+    extraction_version: int,
+) -> None:
+    """落来源锚点与版本化 Markdown 副本（R1 T103/T104）。
+
+    顺序：先落块（锚点），再生成 Markdown（需要块信息），最后登记资产。
+    任何一步失败都**不阻断**抽取主流程（副本是派生产物，可重建），
+    但必须记日志，不能静默假装成功。
+    """
+    from app.preprocessing import anchors as anchor_service
+    from app.preprocessing import markdown as md_service
+
+    # ---- 1) 页块（来源锚点）----
+    try:
+        blocks = []
+        for page in pages:
+            page_no = page.get("page_no") or 1
+            text = (page.get("text") or "").strip()
+            if not text:
+                continue
+            # 无坐标时只给页级锚点（不伪造 bbox）
+            blocks.append(
+                anchor_service.make_block(
+                    document=document,
+                    page_no=page_no,
+                    block_id=f"p{page_no}t1",
+                    text=text,
+                    extraction_version=extraction_version,
+                    block_type="text",
+                )
+            )
+        if blocks:
+            anchor_service.store_blocks(
+                db, document, blocks, extraction_version=extraction_version
+            )
+    except Exception:  # noqa: BLE001 - 锚点失败不阻断抽取
+        logger.exception("pipeline.anchors_failed doc=%s", document.id)
+        db.rollback()
+
+    # ---- 2) Markdown 副本 ----
+    try:
+        pages_for_md = [
+            {
+                "page_no": p.get("page_no") or 1,
+                "text": p.get("text") or "",
+                "blocks": [
+                    {"block_id": f"p{(p.get('page_no') or 1)}t1",
+                     "text": p.get("text") or ""}
+                ] if (p.get("text") or "").strip() else [],
+            }
+            for p in pages
+        ]
+        artifact = md_service.render(
+            document_id=document.id,
+            record_type=document.record_type,
+            doc_type=document.doc_type,
+            payload=payload,
+            pages=pages_for_md,
+            occurred=(
+                document.occurred_start.date().isoformat()
+                if document.occurred_start else None
+            ),
+            time_precision=document.time_precision,
+            facility=document.facility,
+            department=document.department,
+            file_name=document.file_name,
+        )
+        from app.documents import assets as asset_service
+
+        asset_service.put_derivative(
+            db,
+            document,
+            role="markdown",
+            data=artifact.content.encode("utf-8"),
+            mime_type="text/markdown; charset=utf-8",
+            generator=artifact.generator,
+        )
+        if artifact.warnings:
+            logger.info(
+                "markdown.warnings doc=%s warnings=%s", document.id, artifact.warnings
+            )
+    except Exception:  # noqa: BLE001 - 副本失败不阻断抽取
+        logger.exception("pipeline.markdown_failed doc=%s", document.id)
+        db.rollback()
+
+
 def _fail(db: Session, document: Document, job: ExtractionJob, error: str) -> None:
-    """解析失败（E-1）：doc→failed + failure_reason；job→failed。"""
-    if document.status == "extracting":
-        assert_transition(document.status, "failed")
-        document.status = "failed"
+    """解析失败（E-1）：处理状态→failed + failure_reason；job→failed。"""
+    if processing_of(document) == "processing":
+        set_processing_status(document, "failed")
     document.failure_reason = error[:2000]
     job.state = "failed"
     job.error = error[:2000]

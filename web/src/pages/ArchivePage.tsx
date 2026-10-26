@@ -2,10 +2,10 @@ import { useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import ConfirmDialog from '../components/ConfirmDialog';
-import { listStatusNote } from '../components/extractionProgress';
+import { listStatusNote, documentStatusLabels } from '../components/extractionProgress';
 import { documentsApi } from '../api/documents';
 import { useSubjectStore } from '../stores/subjectStore';
-import { DOC_STATUS_LABELS, DocStatus } from '../types/api';
+import { DOC_STATUS_LABELS, DocStatus, RECORD_TYPE_LABELS, formatOccurredAt } from '../types/api';
 
 /** F-04/F-13 档案页：上传 + 列表 + 原件入口。 */
 export default function ArchivePage() {
@@ -57,6 +57,38 @@ export default function ArchivePage() {
     }
   };
 
+  /** 批量上传：逐项结果，单个失败不影响其他（R1 T105）。 */
+  const doUploadMany = async (files: File[]) => {
+    if (!current) {
+      setNotice('请先选择档案对象');
+      return;
+    }
+    setBusy(true);
+    setNotice(null);
+    try {
+      const result = await documentsApi.uploadBatch({
+        subjectId: current.id,
+        files,
+      });
+      const okCount = result.succeeded;
+      const failCount = result.failed;
+      if (failCount > 0) {
+        const firstError = result.items.find((i) => !i.ok);
+        setNotice(
+          `已上传 ${okCount} 个，${failCount} 个失败` +
+            (firstError ? `（${firstError.fileName}: ${firstError.message ?? firstError.code}）` : ''),
+        );
+      } else {
+        setNotice(`已上传 ${okCount} 个文件，正在解析…`);
+      }
+      void list.refetch();
+    } catch (err) {
+      setNotice((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (!current) {
     return <div className="empty-state">请先选择档案对象（顶部切换器）</div>;
   }
@@ -66,16 +98,19 @@ export default function ArchivePage() {
       <section className="panel">
         <header className="panel__header">
           <h2>上传报告</h2>
-          <span className="muted small">支持 JPG / PNG / PDF，单个 ≤ 20MB</span>
+          <span className="muted small">
+            支持 JPG / PNG / PDF / TXT / MD，可多选，单个 ≤ 20MB
+          </span>
         </header>
         <div className="upload-row">
           <input
             ref={fileRef}
             type="file"
-            accept="image/jpeg,image/png,application/pdf"
+            multiple
+            accept="image/jpeg,image/png,application/pdf,text/plain,text/markdown,.txt,.md"
             onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) void doUpload(f);
+              const files = Array.from(e.target.files ?? []);
+              if (files.length) void doUploadMany(files);
               e.target.value = '';
             }}
           />
@@ -121,22 +156,37 @@ export default function ArchivePage() {
         <ul className="doc-list">
           {(list.data?.items ?? []).map((doc) => {
             const note = listStatusNote(doc.status);
+            const labels = documentStatusLabels(doc);
             return (
               <li key={doc.id} className="doc-list__row">
                 <Link to={`/app/archive/${doc.id}`} className="doc-list__item">
                   <span className="doc-list__name">{doc.fileName}</span>
                   <span className={`doc-status doc-status--${doc.status}`}>
-                    {DOC_STATUS_LABELS[doc.status]}
+                    {labels.primary}
                   </span>
+                  {labels.lifecycle && (
+                    <span className="doc-status doc-status--archived">
+                      {labels.lifecycle}
+                    </span>
+                  )}
+                  {labels.needsReconcile && (
+                    <span
+                      className="doc-status doc-status--failed"
+                      title="该记录的处理状态无法从历史数据推断，需要人工确认"
+                    >
+                      状态待核对
+                    </span>
+                  )}
                   <span className="muted small">
-                    {doc.createdAt?.slice(0, 10) ?? ''} ·{' '}
+                    {formatOccurredAt(doc)} ·{' '}
                     {(doc.sizeBytes / 1024).toFixed(0)} KB
-                    {doc.docType ? ` · ${doc.docType}` : ''}
+                    {doc.recordType ? ` · ${RECORD_TYPE_LABELS[doc.recordType] ?? doc.recordType}` : ''}
+                    {doc.facility ? ` · ${doc.facility}` : ''}
                     {doc.pageCount ? ` · ${doc.pageCount} 页` : ''}
                   </span>
                   {note && <span className="small doc-list__note">{note}</span>}
                 </Link>
-                {doc.status !== 'archived' && (
+                {doc.lifecycleStatus !== 'archived' && (
                   <button
                     type="button"
                     className="btn btn--sm btn--ghost doc-list__archive"

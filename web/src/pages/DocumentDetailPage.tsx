@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import * as pdfjs from 'pdfjs-dist';
 import ConfirmCard from '../components/ConfirmCard';
 import {
+  documentStatusLabels,
   estimateHint,
   formatElapsed,
   progressPercent,
@@ -12,7 +13,7 @@ import {
 } from '../components/extractionProgress';
 import { documentsApi } from '../api/documents';
 import { useSubjectStore } from '../stores/subjectStore';
-import { DOC_STATUS_LABELS, DerivedRecord } from '../types/api';
+import { DerivedRecord } from '../types/api';
 
 // pdfjs worker（Vite 下用 CDN 源）
 pdfjs.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -91,6 +92,7 @@ export default function DocumentDetailPage() {
   const inFlight = doc.status === 'pending' || doc.status === 'extracting';
   const pct = progressPercent(job);
   const stageText = job?.stage ? STAGE_LABELS[job.stage] ?? job.stage : '排队中';
+  const labels = documentStatusLabels(doc);
 
   return (
     <div className="doc-detail">
@@ -99,7 +101,23 @@ export default function DocumentDetailPage() {
           ← 返回
         </Link>
         <h2>{doc.fileName}</h2>
-        <span className={`doc-status doc-status--${doc.status}`}>{DOC_STATUS_LABELS[doc.status]}</span>
+        <span className={`doc-status doc-status--${doc.status}`}>{labels.primary}</span>
+        {labels.lifecycle && (
+          <span
+            className="doc-status doc-status--archived"
+            title="已归档：原件仍保留，可在原处查看；取消归档即可恢复"
+          >
+            {labels.lifecycle}
+          </span>
+        )}
+        {labels.needsReconcile && (
+          <span
+            className="doc-status doc-status--failed"
+            title="该记录的处理状态无法从历史数据推断，需要人工确认"
+          >
+            状态待核对
+          </span>
+        )}
       </header>
 
       {inFlight && (

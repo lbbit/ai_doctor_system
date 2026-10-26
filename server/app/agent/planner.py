@@ -104,12 +104,36 @@ def parse_plan(raw: str, max_calls: int = 3) -> Plan:
     return Plan(need_search=bool(calls), calls=calls)
 
 
+def _sanitize_for_outbound(text: str, sanitizer=None) -> str:
+    """出域前脱敏（R0 T005）。
+
+    优先使用调用方提供的（带档案上下文的）脱敏器；否则退回通用模式脱敏。
+    脱敏失败时**不退回原文**，而是返回空串——宁可少信息，也不外泄标识信息。
+    """
+    if not text:
+        return ""
+    if sanitizer is not None:
+        try:
+            return sanitizer(text) or ""
+        except Exception:  # noqa: BLE001
+            logger.warning("agent.sanitizer.failed")
+            return ""
+    try:
+        from app.sanitizer.patterns import sanitize_text
+
+        return sanitize_text(text)[0]
+    except Exception:  # noqa: BLE001
+        logger.warning("agent.sanitizer.fallback_failed")
+        return ""
+
+
 def plan_tools(
     llm,
     question: str,
     *,
     max_calls: int = 3,
     enabled: bool = True,
+    sanitizer=None,
 ) -> Plan:
     """调用 LLM 规划工具；禁用/不可用/失败均返回空计划。
 
@@ -118,16 +142,22 @@ def plan_tools(
     1. 调用方应传入 ``extraction`` profile 的客户端（成本与延迟双降）；
     2. 提示词与输入尽量短（只给问题，不给档案上下文）；
     3. 命中明显规则时**完全跳过模型**（见 ``rule_based_plan``）。
+
+    隐私（R0 T005）：``question`` 会出域，必须先经 ``sanitizer`` 脱敏；
+    未提供 sanitizer 时使用**通用脱敏**（无档案上下文时按模式规则处理），
+    宁可少信息也不外泄标识信息。
     """
     if not enabled:
         return Plan(need_search=False, calls=[], reason="disabled")
     if llm is None or not getattr(llm, "available", lambda: False)():
         return Plan(need_search=False, calls=[], reason="llm_unavailable")
+
+    safe_question = _sanitize_for_outbound(question, sanitizer)
     try:
         raw = llm.chat(
             [
                 {"role": "system", "content": PLANNER_PROMPT},
-                {"role": "user", "content": question[:200]},
+                {"role": "user", "content": safe_question[:200]},
             ],
             json_mode=True,
             temperature=0.0,
@@ -172,11 +202,29 @@ def _build_query(question: str) -> str:
     1. 去掉疑问词/语气词/标点；
     2. 保留医学术语与核心名词；
     3. 长度受控（检索源对长查询支持差）。
+
+    隐私（R0 T005）：检索词会**出域**到第三方搜索源，因此必须去标识化——
+    姓名、电话、证件号、精确日期一律剔除，只保留医学概念。否则用户的
+    身份信息会经搜索请求泄露给外部服务。
     """
     text = (question or "").strip()
     for word in _QUERY_STOPWORDS:
         text = text.replace(word, " ")
     text = re.sub(r"[，。！？、；：“”‘’（）【】\s]+", " ", text)
+    # 去标识：证件号 / 电话 / 邮箱 / 中文日期 / 拉丁姓名片段
+    text = re.sub(r"(?<!\d)\d{17}[\dXx](?!\d)", " ", text)
+    text = re.sub(r"(?<!\d)1[3-9]\d{9}(?!\d)", " ", text)
+    text = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", " ", text)
+    text = re.sub(r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日", " ", text)
+    text = re.sub(r"\d{4}\s*年\s*\d{1,2}\s*月", " ", text)
+    text = re.sub(r"\d{4}\s*[-/]\s*\d{1,2}\s*[-/]\s*\d{1,2}", " ", text)
+    # 中文人名兜底：复用统一脱敏实现（医学术语受保护，"高血压"不会被误删）
+    try:
+        from app.sanitizer.patterns import strip_person_names
+
+        text = strip_person_names(text)
+    except Exception:  # noqa: BLE001
+        pass
     parts = [p for p in text.split() if len(p) >= 2]
     query = " ".join(parts).strip()
     if not query:

@@ -54,8 +54,15 @@ def require_subject(
 
 
 def owned_or_404(account: Account, obj: Optional[T], subject_id: Optional[str] = None) -> T:
-    """越权/不存在一律 404（K4/IDOR）。"""
+    """越权/不存在/已软删一律 404（K4/IDOR）。
+
+    软删（`deleted_at` 非空）的对象一律视为不存在：档案删除、重复上传顶替等
+    场景留下的行仍在库中，若按 ID 仍可读取详情、签名原件、确认入库，等于绕过
+    生命周期策略。404 而非 403，与跨档语义一致，不泄露资源存在性。
+    """
     if obj is None:
+        raise NotFoundError()
+    if getattr(obj, "deleted_at", None) is not None:
         raise NotFoundError()
     owner = getattr(obj, "account_id", None)
     if owner is not None and owner != account.id:

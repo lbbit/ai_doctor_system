@@ -27,6 +27,17 @@ export type DocStatus =
   | 'failed'
   | 'archived';
 
+/** 处理状态（与生命周期正交，R0 T004）。 */
+export type ProcessingStatus =
+  | 'pending'
+  | 'processing'
+  | 'awaiting_review'
+  | 'processed'
+  | 'failed';
+
+/** 生命周期（与处理状态正交）：归档=从默认视图隐藏，不等于删除。 */
+export type LifecycleStatus = 'active' | 'archived' | 'deletion_pending';
+
 export type DocType = 'lab_report' | 'imaging_report' | 'visit_record' | 'other';
 
 export interface Document {
@@ -34,7 +45,23 @@ export interface Document {
   subjectId: string;
   kind: 'PDF' | 'IMAGE' | 'DICOM' | 'AUDIO' | 'TEXT';
   docType: DocType | null;
+  /** 旧兼容字段：归档时为 archived，保留以兼容既有客户端。 */
   status: DocStatus;
+  processingStatus: ProcessingStatus;
+  lifecycleStatus: LifecycleStatus;
+  /** processed 的细分：confirmed（已入库）/ no_data（无临床字段）。 */
+  contentStatus: 'confirmed' | 'no_data' | null;
+  /** 历史行处理状态无法推断时为 true，需人工/后台对账。 */
+  needsReconcile: boolean;
+  // R1 T101：来源元数据
+  recordType: string | null;
+  occurredStart: string | null;
+  occurredEnd: string | null;
+  timePrecision: TimePrecision;
+  reportedAt: string | null;
+  facility: string | null;
+  department: string | null;
+  sourceNote: string | null;
   fileName: string;
   mimeType: string;
   sizeBytes: number;
@@ -45,6 +72,41 @@ export interface Document {
   archivedAt: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+}
+
+/** 时间精度（R1 T101）：日期在档案里的确切程度。 */
+export type TimePrecision =
+  | 'datetime'
+  | 'day'
+  | 'month'
+  | 'year'
+  | 'range'
+  | 'unknown';
+
+/** 派生资产（R1 T102）。 */
+export type AssetRole =
+  | 'original'
+  | 'markdown'
+  | 'normalized_text'
+  | 'page_image'
+  | 'page_text';
+
+export interface DocumentAsset {
+  id: string;
+  documentId: string;
+  role: AssetRole;
+  version: number;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  sourceHash: string;
+  generator: string;
+  pageNo: number | null;
+  /** 源文件已变化 → 该副本需重新生成（旧副本仍保留）。 */
+  stale: boolean;
+  createdAt: string | null;
+  url?: string;
+  expiresAt?: string;
 }
 
 export interface Page<T> {
@@ -359,6 +421,61 @@ export const DOC_STATUS_LABELS: Record<DocStatus, string> = {
   failed: '解析失败',
   archived: '已归档',
 };
+
+/** 处理状态文案（与生命周期分开显示，R0 T004）。 */
+export const PROCESSING_STATUS_LABELS: Record<ProcessingStatus, string> = {
+  pending: '待处理',
+  processing: '抽取中',
+  awaiting_review: '待确认',
+  processed: '已处理',
+  failed: '解析失败',
+};
+
+export const LIFECYCLE_STATUS_LABELS: Record<LifecycleStatus, string> = {
+  active: '在用',
+  archived: '已归档',
+  deletion_pending: '待删除',
+};
+
+export const TIME_PRECISION_LABELS: Record<TimePrecision, string> = {
+  datetime: '精确到时刻',
+  day: '按日',
+  month: '按月',
+  year: '按年',
+  range: '区间',
+  unknown: '时间未知',
+};
+
+export const RECORD_TYPE_LABELS: Record<string, string> = {
+  lab_report: '检验/检查单',
+  imaging_report: '影像报告',
+  visit_record: '病历/就诊记录',
+  discharge_summary: '出院小结',
+  checkup_report: '体检报告',
+  medication_record: '用药记录',
+  treatment_record: '治疗记录',
+  ecg: '心电图',
+  text_note: '文本记录',
+  other: '其他',
+};
+
+/** 时间展示：按精度给出可读文案（未知不得显示成 1 月 1 日）。 */
+export function formatOccurredAt(doc: {
+  occurredStart?: string | null;
+  occurredEnd?: string | null;
+  timePrecision?: TimePrecision;
+}): string {
+  const precision = doc.timePrecision ?? 'unknown';
+  if (precision === 'unknown' || !doc.occurredStart) return '时间未知';
+  const start = doc.occurredStart;
+  if (precision === 'year') return start.slice(0, 4) + ' 年';
+  if (precision === 'month') return start.slice(0, 7);
+  if (precision === 'range' && doc.occurredEnd) {
+    return `${start.slice(0, 10)} ~ ${doc.occurredEnd.slice(0, 10)}`;
+  }
+  if (precision === 'datetime') return start.replace('T', ' ').slice(0, 16);
+  return start.slice(0, 10);
+}
 
 export const EVENT_TYPE_LABELS: Record<string, string> = {
   visit: '就诊',

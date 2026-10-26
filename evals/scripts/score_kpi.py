@@ -24,6 +24,14 @@ from pathlib import Path
 
 THRESHOLDS = {"K1": 0.90, "K2": 0.95, "K3": 0.85}
 
+# K3 完整问题集下限（PRD §3：≥20 个典型时序问题）
+# 为什么是硬门槛：早期实现只要有 1 个已判定问题就能输出 100% 通过率，
+# 可通过"只判定会通过的题"刷分。判定数不足或存在未判定题时**不输出通过率**。
+MIN_K3_QUESTIONS = 20
+
+# 评测口径版本（改动计分逻辑时必须同步递增，并写回 manifest）
+SCORER_VERSION = "v4"
+
 
 def _load_jsonl(path: Path) -> list[dict]:
     rows = []
@@ -444,10 +452,21 @@ def score_k1k2(
     （"影像诊断=支气管肺炎"），它们天然没有单位 → unit 比对必然失败，
     若计入会污染分母、让准确率失真。预处理脚本已写入 ``kpiClass``，
     此处按类过滤，并把定性项**单独统计**供参考。
+
+    R0 T002 冻结口径：除 K1（召回）外，同时报告
+    - ``K1_precision``：预测字段里有多少确实对应标注（防止"多抽一堆"被满分掩盖）；
+    - ``K1_macro``：按文档平均（防止单份大报告主导整体指标）；
+    - ``stratified_by_docType``：按报告类型分层（防止某类崩塌被总体值掩盖）。
     """
     k1_hit = k1_total = k2_hit = k2_total = 0
     # 定性项单独统计（不进 K1/K2，但要看它抽得出来）
     qual_hit = qual_total = 0
+    # 精确率：预测字段总数与其中命中标注的个数
+    pred_total = pred_matched = 0
+    # 宏平均：逐文档 K1
+    doc_rates: list[float] = []
+    # 分层：docType → 与顶层同构的计数键
+    strata: dict[str, dict[str, tuple[int, int]]] = {}
     missing_preds, extra_fields, misses = [], [], []
     for ann in annotations:
         pred_file = pred_dir / (Path(ann["file"]).stem + ".json")
@@ -500,6 +519,15 @@ def score_k1k2(
             return candidates[0], "normalized_loose"
 
         annotated_names = set()
+        doc_hit = doc_total = 0
+        doc_type = str(ann.get("docType") or "unknown")
+        stratum = strata.setdefault(
+            doc_type,
+            {
+                "K1_field_accuracy": [0, 0],
+                "K2_abnormal_recall": [0, 0],
+            },
+        )
         for field in ann.get("fields", []):
             name = field["name"]
             cls = field.get("kpiClass", "primary")
@@ -542,6 +570,10 @@ def score_k1k2(
 
             k1_total += 1
             k1_hit += int(hit)
+            doc_total += 1
+            doc_hit += int(hit)
+            stratum["K1_field_accuracy"][0] += int(hit)
+            stratum["K1_field_accuracy"][1] += 1
             if not hit:
                 reason = []
                 if pf is None:
@@ -565,12 +597,46 @@ def score_k1k2(
             if field.get("abnormal"):
                 k2_total += 1
                 k2_hit += int(hit)
+                stratum["K2_abnormal_recall"][0] += int(hit)
+                stratum["K2_abnormal_recall"][1] += 1
+        if doc_total:
+            doc_rates.append(doc_hit / doc_total)
         # 多余字段：用严格归一化名比对（避免成对指标被误判为同一项）
         ann_norm = {
             normalize_name(n, keep_count_kind=True) for n in annotated_names
         }
-        for extra_key in set(pmap.keys()) - ann_norm:
+        extra_keys = set(pmap.keys()) - ann_norm
+        for extra_key in extra_keys:
             extra_fields.append(f"{pred_file.name}:{pmap[extra_key].get('name')}")
+        # 精确率：分母 = 全部预测字段；分子 = 能对应到某条标注的预测字段数。
+        # 必须复用与 K1 命中**同一套**匹配语义（归一化 + names_match 安全阀），
+        # 否则"白细胞计数"对标注"白细胞"会被误判为多余，精确率虚低
+        # （2026-10-26 实测：初版口径给出 51%，实为匹配口径不一致所致）。
+        #
+        # 口径说明：预测文件**不携带 kpiClass**，无法按类拆分预测字段，
+        # 因此分子按"匹配到任意一条标注"计算（回答"预测出来的字段是否真实存在"），
+        # 分母为全部预测字段。该值是**保守下界**（含定性/其他类预测）。
+        all_ann_norm = {
+            normalize_name(str(f.get("name") or ""), keep_count_kind=True)
+            for f in ann.get("fields", [])
+        }
+        all_anns = [
+            (str(f.get("name") or ""), str(f.get("unit") or ""))
+            for f in ann.get("fields", [])
+        ]
+        for pf in pred_fields:
+            pred_total += 1
+            p_name = str(pf.get("name") or "")
+            p_unit = str(pf.get("unit") or "")
+            p_key = normalize_name(p_name, keep_count_kind=True)
+            if p_key in all_ann_norm:
+                pred_matched += 1
+                continue
+            if any(
+                names_match(p_name, a_name, a_unit=p_unit, b_unit=a_unit)
+                for a_name, a_unit in all_anns
+            ):
+                pred_matched += 1
 
     result = {
         "K1_field_accuracy": (k1_hit, k1_total),
@@ -579,6 +645,15 @@ def score_k1k2(
         "missing_predictions": missing_preds,
         "extra_pred_fields(抽查)": extra_fields,
         "misses": misses,
+        "scorer_version": SCORER_VERSION,
+    }
+    # R0 T002：精确率、宏平均、分层（防止"多抽一堆"或单份大报告掩盖问题）
+    result["K1_precision"] = (pred_matched, pred_total)
+    result["K1_macro"] = (
+        round(sum(doc_rates) / len(doc_rates), 4) if doc_rates else float("nan")
+    )
+    result["stratified_by_docType"] = {
+        name: {k: tuple(v) for k, v in s.items()} for name, s in strata.items()
     }
     if dry_run or not annotations:
         print("[dry-run] 标注/预测未就绪，仅校验脚本可运行。")
@@ -590,15 +665,54 @@ def score_k1k2(
 
 
 def score_k3(rows: list[dict]) -> dict:
+    """K3 引用正确率（PRD §3：≥20 个典型时序问题，人工判定）。
+
+    R0 T002 冻结口径：**必须完整**才输出通过率。
+    - 判定数 < MIN_K3_QUESTIONS → 只报告进度，不给 rate/verdict；
+    - 存在未判定问题 → 同样不输出（否则可只判定会通过的题来刷分）。
+
+    这条门槛修的是一个真实缺陷：早期实现只要有 1 个已判定问题就输出
+    100% 通过率，容易被误读为"K3 已达标"。
+    """
     judged = [r for r in rows if r.get("verdict_manual") in ("pass", "fail")]
+    unjudged = [r for r in rows if r.get("verdict_manual") not in ("pass", "fail")]
     passed = sum(1 for r in judged if r["verdict_manual"] == "pass")
-    out = {"judged": len(judged), "passed": passed}
-    if not judged:
-        print("[dry-run] K3 verdict_manual 尚未人工填写（需真实 LLM 网关下评测）。")
+    out = {
+        "judged": len(judged),
+        "passed": passed,
+        "unjudged": len(unjudged),
+        "required": MIN_K3_QUESTIONS,
+        "complete": len(judged) >= MIN_K3_QUESTIONS and not unjudged,
+        "scorer_version": SCORER_VERSION,
+    }
+    if not out["complete"]:
+        print(
+            "[incomplete] K3 评测集不完整"
+            f"（已判定 {len(judged)}/{MIN_K3_QUESTIONS}，未判定 {len(unjudged)}）"
+            "：不输出通过率与 GO/NO-GO 结论。"
+        )
         return out
     rate = passed / len(judged)
     out.update({"rate": round(rate, 4), "verdict": {"K3": _gate(rate, THRESHOLDS["K3"])}})
     return out
+
+
+def load_manifest(base_dir: Path) -> dict:
+    """读取评测版本清单（数据集/标注/评分器/预测版本、切分、样本量）。
+
+    缺失时返回 ``{"present": False}``——**不静默当作已冻结**，
+    避免在未标注版本的情况下宣称结果可复现。
+    """
+    path = Path(base_dir) / "manifest.json"
+    if not path.exists():
+        return {"present": False, "path": str(path)}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {"present": False, "path": str(path), "error": str(exc)}
+    data.setdefault("present", True)
+    data["path"] = str(path)
+    return data
 
 
 def _gate(rate: float, threshold: float) -> str:
@@ -763,9 +877,20 @@ def selftest() -> None:
         assert res["K2_abnormal_recall"] == (1, 1), res
         assert res["qualitative_hit_rate(参考)"] == (1, 1), res
         assert res["verdict"]["K1"] == "NO-GO" and res["verdict"]["K2"] == "GO", res
+        # R0 T002：精确率与宏平均必须存在
+        assert "K1_precision" in res and "K1_macro" in res, res
+        assert "stratified_by_docType" in res, res
 
+    # --- K3 完整性门槛（R0 T002：不足 20 题或存在未判定 → 不得输出通过率）---
     k3 = score_k3([{"id": "q1", "verdict_manual": "pass"}, {"id": "q2", "verdict_manual": None}])
-    assert k3["judged"] == 1 and k3["passed"] == 1 and k3["rate"] == 1.0, k3
+    assert k3["judged"] == 1 and k3["passed"] == 1, k3
+    assert "rate" not in k3 and "verdict" not in k3, k3
+    assert k3["complete"] is False and k3["required"] == MIN_K3_QUESTIONS, k3
+    full = score_k3(
+        [{"id": f"q{i}", "verdict_manual": "pass"} for i in range(MIN_K3_QUESTIONS)]
+    )
+    assert full["complete"] is True and full["rate"] == 1.0, full
+    assert full["verdict"]["K3"] == "GO", full
     print("selftest OK")
 
 
@@ -780,6 +905,19 @@ def _summarize(result: dict) -> str:
         lines.append(f"  缺预测的报告: {len(result['missing_predictions'])}")
     if result.get("misses"):
         lines.append(f"  未命中明细: {len(result['misses'])} 条（见 JSON 输出）")
+    # R0 T002：精确率与宏平均（只看 K1 召回会漏掉"多抽一堆"）
+    prec = result.get("K1_precision")
+    if prec and prec[1]:
+        lines.append(f"  K1_precision: {prec[0]}/{prec[1]} = {prec[0] / prec[1] * 100:.2f}%")
+    macro = result.get("K1_macro")
+    if macro is not None and macro == macro:  # 非 NaN
+        lines.append(f"  K1_macro(按文档): {macro * 100:.2f}%")
+    for name, s in (result.get("stratified_by_docType") or {}).items():
+        pair = s.get("K1_field_accuracy") or (0, 0)
+        if pair[1]:
+            lines.append(
+                f"    - {name}: K1 {pair[0]}/{pair[1]} = {pair[0] / pair[1] * 100:.2f}%"
+            )
     if result.get("verdict"):
         lines.append(f"  结论: {result['verdict']}")
     return "\n".join(lines)
@@ -815,9 +953,16 @@ def main() -> None:
             dry_run=args.dry_run or not annotations,
             include_classes=classes,
         )
+        manifest = load_manifest(base)
+        result["manifest"] = manifest
         print(json.dumps(result, ensure_ascii=False, indent=2))
         print("\n摘要：")
         print(_summarize(result))
+        if not manifest.get("present"):
+            print(
+                "\n[warn] 未找到 manifest.json：本次结果缺少数据集/标注/评分器版本，"
+                "不可作为可复现的发布证据（R0 T002 要求冻结版本）。"
+            )
     elif args.cmd == "k3":
         rows = _load_jsonl(Path(args.questions))
         print(json.dumps(score_k3(rows), ensure_ascii=False, indent=2))

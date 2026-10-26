@@ -10,55 +10,122 @@
 
 ### 0.1 当前方向：长期健康资产 + 主动取证问诊
 
-2026-10-26 已完成下一阶段的**需求、目标架构与路线图设计，尚未开始对应实现**：
+2026-10-26 完成下一阶段的**需求、目标架构与路线图设计**，并已完成 **R0 阶段实施**
+（生命周期正交、软删安全、出域隐私、评测口径冻结）；**R1–R4 尚未开始**：
 
 - 设计：`docs/superpowers/specs/2026-10-26-health-record-intelligence.md`
 - 实施计划：`docs/superpowers/plans/2026-10-26-health-record-intelligence.md`
-- 路线：R0 安全/文档基线 → R1 多类型资产与版本化 Markdown → R2 混合检索 → R3 主动查档/原件复读/追问 → R4 权威外部证据与规模验收。
+- 路线：R0 安全/文档基线（✅）→ R1 多类型资产与版本化 Markdown → R2 混合检索 → R3 主动查档/原件复读/追问 → R4 权威外部证据与规模验收。
 - 关键决策：沿用模块化单体与现有领域 ID；原件不可变，派生资产版本化；按发生时间组织；指标用 SQL、语义检索找候选；AI 有界主动取证，不把全史塞入上下文。
 - 待评审：默认“删除=归档”是否满足诉求、云端原图复读默认禁用、医学顾问和权威知识来源、中文分词与 embedding 选型。
 
-### 0.2 已记录基线（不是本轮新鲜测试）
+### 0.2 当前基线（2026-10-26，R1 T101–T105 后，当前树新鲜执行）
 
 | 项 | 最近记录 | 当前解释 |
 |---|---|---|
-| 后端 | 2026-10-23：641 passed | 历史证据；本轮只做文档和代码静态审计，未重跑 |
-| 前端 | 2026-10-22：120 passed，build 通过 | 历史证据；后续后端变更不代表前端重新验证 |
-| K1 / K2 | 2026-10-23：281/282=99.65%；37/37=100% | 达到既定阈值，但仅 38 份/37 异常，且含评分口径调整；需冻结口径和未见样本复验 |
-| 定性项 | 2026-10-23：140/155=90.32% | 参考指标，不等同独立生产质量证明 |
-| K3 / K5 | 未完成完整评测 | K3 需≥20 问全部人工 verdict；K5 待真实漏斗统计 |
-| K4 | 自动化及浏览器专项有证据 | 仍需新资产/搜索/工具通道逐层回归和审计抽查 |
-| Compose / K8s | Compose 有较早实测；K8s 未实际 apply | 不得将旧 Compose 结果当作当前发布证据 |
+| 后端 | **741 passed**，EXIT=0（2026-10-26，两次独立运行一致） | R0 基线 641 → R1 T101–T105 后 741（+100 例） |
+| 前端 | **133 passed**，build 通过，EXIT=0（2026-10-26） | 新增发生时间展示用例 |
+| 评测契约 | 10 passed；`score_kpi.py selftest` OK（2026-10-26） | K3 完整性门槛与精确率口径已冻结 |
+| K1 / K2 | 281/282=99.65%；37/37=100%（2026-10-26 重跑，口径冻结后不变） | 达到既定阈值，但仅 38 份/37 异常且为 development 集；需未见样本复验（B-4） |
+| K1 精确率 | 428/440 = 97.27%（新增指标） | 初版口径虚报 51%，修正后可信；仍为含全部预测字段的保守下界 |
+| K1 宏平均 | 99.24%（按文档） | 新增指标，防止单份大报告主导整体 |
+| 定性项 | 140/155=90.32% | 参考指标，不等同独立生产质量证明 |
+| K3 / K5 | 未完成完整评测 | K3 需≥20 问全部人工 verdict（**现在不达 20 题就不输出通过率**）；K5 待真实漏斗统计 |
+| K4 | 自动化及浏览器专项有证据；R0 新增软删/生命周期用例 | 仍需新资产/搜索/工具通道逐层回归和审计抽查 |
+| 迁移 0007 | 回填逻辑 4 例等价 SQL 单测通过 | **整链未在真实 PostgreSQL 验证**（B-1：Docker 未运行） |
+| Compose / K8s | Compose 有较早实测；K8s 未实际 apply | 本机 Docker 未运行，未做容器验证；不得将旧结果当作当前发布证据 |
 
 ### 0.3 静态审计发现，进入 R0 优先处理
 
-- 软删/归档读取和后台任务过滤不完整：部分软删文档仍可能按 ID 读取或被 worker 再处理；须先复现并用测试修复。
-- `archived` 与处理状态混在 `documents.status`，需正交化且兼容旧客户端。
-- 尚无独立版本化 Markdown 资产、全文/语义检索、问诊按需原件读取和统一外部证据引用。
-- 问诊规划/搜索的查询脱敏和不可信内容隔离需补强；云端原图不得默认出域。
+> 以下缺口已在 R0 实施中修复（T003/T004/T005），保留作为审计痕迹。
+
+- 软删/归档读取和后台任务过滤不完整：部分软删文档仍可能按 ID 读取或被 worker 再处理；须先复现并用测试修复。**→ 已修**（`owned_or_404` 过滤 `deleted_at`；worker/pipeline 遇软删→cancelled）
+- `archived` 与处理状态混在 `documents.status`，需正交化且兼容旧客户端。**→ 已修**（`documents/state.py` 单一权威；旧 `status` 为派生投影）
+- 尚无独立版本化 Markdown 资产、全文/语义检索、问诊按需原件读取和统一外部证据引用。**→ R1/R2/R3**
+- 问诊规划/搜索的查询脱敏和不可信内容隔离需补强；云端原图不得默认出域。**→ 文本出域已修**；图像出域策略待评审（阻塞项）
 - 本文档下方及旧 PRD/ARCHITECTURE 的早期任务数、状态、依赖和“待样本”描述仅作历史记录；冲突时以本仪表盘、当前代码和已接受新设计为准。
 
-### 0.4 本轮文档变更（2026-10-26）
+### 0.4 本轮变更（2026-10-26，R0 实施）
 
-| 文件 | 内容 | 验证 |
-|---|---|---|
-| `docs/superpowers/specs/2026-10-26-health-record-intelligence.md`（新） | 全类型资产、时间/状态、混合检索、主动问诊、证据与安全设计 | 静态评审后补齐主数据、页锚版本、隐私全链路、红旗分支、指标口径 |
-| `docs/superpowers/plans/2026-10-26-health-record-intelligence.md`（新） | R0–R4、38 个任务、TDD/迁移/回滚/观测/验收 | 路径与依赖复核；未执行实现或测试 |
-| `PLAN.md`、`docs/PRD.md`、`docs/ARCHITECTURE.md`、`README.md`、`evals/README.md` | 统一实时状态与设计导航，标记旧基线边界 | 文档链接与状态一致性检查；无代码变更 |
+| 任务 | 状态 | 变更文件 | 证据 |
+|---|---|---|---|
+| T003 软删/归档读取与后台再处理 | ✅ 完成 | `app/auth/deps.py`（`owned_or_404` 过滤 `deleted_at`）、`app/preprocessing/pipeline.py`（软删→job cancelled）、`app/worker.py`（补偿/租约回收排除软删）、`tests/api/test_document_lifecycle.py`(11 例) | 先写 8 例失败（RED）→实现→全绿 |
+| T004 处理状态与生命周期正交 | ✅ 完成 | `app/documents/state.py`(新，单一状态权威)、`app/db/models/document.py`(+4 列+2 索引)、`alembic/versions/0007_document_lifecycle_states.py`(新)、`documents/service.py`+`router.py`(+restore)、`preprocessing/{pipeline,review}.py`、`worker.py`、前端 `types/api.ts`+`components/extractionProgress.ts`+两页、`docs/adr/0001-document-lifecycle-and-assets.md`(新)、`tests/unit/test_document_state.py`(7)+`tests/integration/test_migration_0007_lifecycle.py`(4)+`web/tests/documentStatus.test.ts`(6) | 归档不再覆盖"已确认"；旧 `status` 保留为派生投影，旧客户端行为不变 |
+| T005 全链路出域隐私 | ✅ 完成 | `app/agent/{planner,tools}.py`、`app/chat/{titler,orchestration}.py`、`app/sanitizer/patterns.py`（新增人名兜底）、`tests/unit/test_outbound_privacy.py`(10) | 规划/标题/搜索词/结果标题出域前脱敏；URL 只送域名；脱敏失败不退回原文 |
+| T002 冻结评测口径 | ✅ 完成 | `evals/scripts/score_kpi.py`（K3 完整性门槛、K1 精确率/宏平均/分层、`load_manifest`）、`evals/dataset/kpi_k1k2/manifest.json`(新)、`evals/tests/test_score_kpi_contract.py`(10) | K1/K2 数值不变；K1_precision 97.27%；K3 未达 20 题不再输出通过率 |
+| T006 R0 出口 | 🟡 部分完成 | — | 后端/前端/评测测试全绿；**迁移整链未在真实 PostgreSQL 验证**（见阻塞项） |
 
-**下一步**：评审 §0.1 的待决项；批准后从 R0 T001/T002 开始，T003 先写软删读取与 worker 再处理的失败测试。不得直接跳到 R3。
+**本轮变更文件清单**（后端 / 前端 / 迁移 / 评测 / 文档）：
+
+| 类别 | 文件 |
+|---|---|
+| 后端（新增） | `server/app/documents/state.py` |
+| 后端（改） | `server/app/auth/deps.py`、`server/app/documents/{service,router}.py`、`server/app/preprocessing/{pipeline,review}.py`、`server/app/worker.py`、`server/app/agent/{planner,tools}.py`、`server/app/chat/{titler,orchestration}.py`、`server/app/sanitizer/patterns.py`、`server/app/db/models/document.py` |
+| 迁移（新增） | `server/alembic/versions/0007_document_lifecycle_states.py` |
+| 测试（新增） | `server/tests/api/test_document_lifecycle.py`(11)、`server/tests/unit/test_document_state.py`(7)、`server/tests/unit/test_outbound_privacy.py`(10)、`server/tests/integration/test_migration_0007_lifecycle.py`(4)、`web/tests/documentStatus.test.ts`(6)、`evals/tests/test_score_kpi_contract.py`(10) |
+| 测试基建（改） | `server/tests/conftest.py`（测试库按进程隔离，修复并发假失败） |
+| 前端（改） | `web/src/types/api.ts`、`web/src/components/extractionProgress.ts`、`web/src/pages/{ArchivePage,DocumentDetailPage}.tsx`、`web/src/api/documents.ts` |
+| 评测（改/新增） | `evals/scripts/score_kpi.py`、`evals/dataset/kpi_k1k2/manifest.json` |
+| 文档（改/新增） | `PLAN.md`、`docs/adr/0001-document-lifecycle-and-assets.md`、两份 `2026-10-26-health-record-intelligence.md`、设计文档头部状态 |
+
+**R0 期间修正的真实缺陷**（均为本轮改动引入或暴露，已修复并加测试）：
+
+1. 软删文档仍可按 ID 读取详情/签名原件/取草稿/确认入库（K4 同级越权）；
+2. worker 会为已软删文档重新生成草稿并改写其状态；
+3. 归档覆盖 `confirmed`，"已确认入库"这一临床事实被生命周期动作抹掉，且归档不可恢复；
+4. 问诊规划器与会话标题生成把**原始提问/回答**送出域，未脱敏；
+5. 搜索结果的**标题与 URL** 未脱敏即进入 prompt（仅 snippet 被处理）；
+6. 脱敏器新增的中文人名兜底会误删医学词（"高血压"→"血压"、"血脂偏高"→"血脂要"）——已改为"需人名上下文 + 医学搭配保护"双重保险；
+7. 评分器 K1 精确率初版口径不一致（"白细胞计数"对标注"白细胞"被误判多余，精确率虚报 51%）——改为复用命中同款匹配语义后为 97.27%；
+8. **测试库固定路径导致并发运行互相破坏**（`server/tests/conftest.py` 用固定 `aidoctor_pytest.db`，两个 pytest 进程互相 drop/create 表，产生 "no such table" 假失败）——改为每次运行使用进程唯一库文件；修复后并发运行实测两路均 674 passed。**注意：跑测试时不要并发执行多个 pytest 进程**（虽已隔离，仍会拖慢且可能争用端口）。
+
+**下一步**：R0 阻塞项清零后进入 R1（T101 起）。不得跳过 R1 直接做检索/Agent。
 
 ### 0.5 下一阶段里程碑
 
 | 阶段 | 内容 | 状态 | 出口 |
 |---|---|---|---|
-| R0 | 文档/评测基线、软删与任务安全、生命周期 ADR | **设计完成，待实施** | 隔离/恢复测试、冻结评测口径 |
-| R1 | 多类型上传、发生时间、资产/页锚、Markdown、版本差异 | ⬜ 未开始 | 各类型资产闭环、HITL 与原件不回归 |
+| R0 | 文档/评测基线、软删与任务安全、生命周期 ADR | **代码完成，迁移整链验证待补** | 隔离/恢复测试、冻结评测口径 |
+| R1 | 多类型上传、发生时间、资产/页锚、Markdown、版本差异 | **进行中（T101/T102 已完成）** | 各类型资产闭环、HITL 与原件不回归 |
 | R2 | FTS+pgvector+SQL 混合检索、长期档案中心 | ⬜ 未开始 | Recall@20≥95%、候选 Precision@20≥90%、权限/性能达标 |
 | R3 | 有界问诊 Agent、急慢病策略、追问、原件精读 | ⬜ 未开始 | 采用证据精确率≥90%、临床策略/安全集、引用支持、SSE 兼容 |
 | R4 | 权威外部证据、留出集、备份恢复、规模验收 | ⬜ 未开始 | 真实/合成端到端证据与医学评审 |
 
 **工作顺序约束：先 R0，再 R1；不得从 Agent 界面或向量接入绕过资产与安全地基。**
+
+### 0.7 R1 进展（2026-10-26）
+
+| 任务 | 状态 | 落地 | 测试 |
+|---|---|---|---|
+| T101 文档类型/时间/来源元数据 | ✅ | `app/common/timeline.py`（时间语义单一权威）、迁移 `0008`、`documents`+`observations` 新增字段、上传支持用户填写元数据、列表按发生时间排序 | 16 + 9 = 25 例 |
+| T102 DocumentAsset 与资产服务 | ✅ | `app/db/models/document_asset.py`、`app/documents/assets.py`、迁移 `0009`、资产 API 两个端点 | 10 例 |
+| T103 页块与来源锚点 | ✅ | `app/db/models/document_block.py`、`app/preprocessing/anchors.py`、迁移 `0010`、抽取后自动落锚点 | 7 例 |
+| T104 类型化 Markdown 生成器 | ✅ | `app/preprocessing/markdown.py`（8 模板）、接入抽取管线、产出版本化 Markdown 副本 | 14 + 2 集成例 |
+| T105 文本文件与批量导入 | ✅ | TXT/MD 上传（内容级校验）、文本分页、`POST /api/documents/batch`、前端多选上传 | 8 例 |
+
+**R1 期间修正的问题**：
+
+1. 月精度被忽略——`_parse_user_span` 原先按字符串长度推断精度，用户显式传 `month` 时失效，改为**显式精度优先**；
+2. `record_type` 未持久化——上传时未写入模型字段；
+3. "用户已填写"的判定过粗——原用 `source_note` 代理，会误判其他字段，改为**逐字段**判断（字段非空即已填写）；
+4. 资产服务在测试中直连真实 MinIO——`conftest` 的假存储未覆盖新模块，补上；
+5. 测试 PNG 内容相同导致上传触发去重 409——`make_png_bytes` 增加 `salt` 参数；
+6. **YAML 过度转义**——`doc-1` 这类简单值被加引号，改为只在真正破坏解析时才加引号；
+7. **文本解码误判**——用被截断的 16 字节判定编码，切断点多字节中文 → 正常中文文本被判"解码失败"，改为用**完整内容**校验；
+8. 批量上传缺 Subject 时逐项报错（用户看到一堆无意义失败），改为**整体 422**。
+
+**R1 剩余**：T106 重抽差异、T107 文档详情四区（原件/副本/结构化/版本历史）、T108 标准主数据与出口对账。
+
+### 0.6 R0 阻塞项（必须清零后才进入 R1）
+
+| # | 阻塞项 | 原因 | 需要什么 | 影响 |
+|---|---|---|---|---|
+| B-1 | 迁移 `0007` 未在真实 PostgreSQL 整链验证 | 本机 Docker 未运行（`docker ps` 连接失败）；仓库既有迁移 0003/0005 依赖 PostgreSQL（JSONB / 实时查询），SQLite 上无法整链执行 | 启动 Docker Desktop → `docker compose up -d postgres` → `alembic upgrade head` → 校验回填与索引 | 迁移逻辑已用等价 SQL 在 SQLite 单测覆盖（4 例），但**整链与真实数据回填未验** |
+| B-2 | 云端图像出域策略未批准 | 上传预处理的 VLM/OCR 会把病历图片送云端；脱敏对图像无效 | 决策：默认禁用云端图像 / 限定可裁剪遮蔽 / 接受现状并留审计 | 属**既有能力**的隐私缺口，非本轮引入；R1 引入 `image_read` 前必须先决策 |
+| B-3 | 医学顾问与权威来源未到位 | 临床策略集、追问验收、外部证据白名单需医学专业把关 | 指定医学顾问 + 确认来源许可 | 阻塞 R3/R4 的医学验收，不阻塞 R1/R2 |
+| B-4 | 留出集不存在 | 当前 38 份为 development 集，K1/K2 数字可能被其分布“喂”出来 | 扩充 ≥100 份未参与调参的样本 | K1/K2 目前只能称“开发集达标” |
+
+> B-1 与 B-4 属**验证缺口**而非功能缺口：不得因未验证就宣称“已达标”，也不得因此阻塞可独立验收的 R1 任务。
 
 ---
 

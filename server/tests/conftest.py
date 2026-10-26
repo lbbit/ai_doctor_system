@@ -2,9 +2,17 @@
 
 import os
 import tempfile
+import uuid
 
 # 必须在导入 app 之前设置（settings 单例读取）
-_DB_PATH = os.path.join(tempfile.gettempdir(), "aidoctor_pytest.db").replace("\\", "/")
+#
+# 为什么用**每次运行独立**的库文件：固定路径会让并发的两个 pytest 进程
+# 互相 drop/create 同一批表，产生 "no such table" / "table already exists"
+# 的假失败（2026-10-26 实测踩到两次）。用进程唯一名隔离后，
+# 并发运行互不干扰，串行运行的既有行为不变。
+_DB_PATH = os.path.join(
+    tempfile.gettempdir(), f"aidoctor_pytest_{os.getpid()}_{uuid.uuid4().hex[:8]}.db"
+).replace("\\", "/")
 os.environ["DATABASE_URL"] = f"sqlite:///{_DB_PATH}"
 os.environ["LLM_API_KEY"] = ""          # 默认离线（VLM 不可用 → 降级链）
 os.environ["REDIS_URL"] = "redis://localhost:6399/0"  # 不存在端口 → 快速失败放行
@@ -72,6 +80,7 @@ def fake_storage(monkeypatch):
     def _fake():
         return store
 
+    import app.documents.assets as assets_mod
     import app.documents.service as documents_service
     import app.documents.storage as storage_mod
     import app.preprocessing.pipeline as pipeline_mod
@@ -79,7 +88,7 @@ def fake_storage(monkeypatch):
 
     # chat.citations 在函数内 import，会自动取到 storage_mod 的补丁；
     # 仅对真正持有该符号的模块打补丁（review 已改为异步入队，不再直接读存储）
-    for mod in (documents_service, storage_mod, pipeline_mod, review_mod):
+    for mod in (documents_service, storage_mod, pipeline_mod, review_mod, assets_mod):
         if hasattr(mod, "get_storage_client"):
             monkeypatch.setattr(mod, "get_storage_client", _fake)
     return store
@@ -244,8 +253,11 @@ def fake_llm(monkeypatch):
     return _make
 
 
-def make_png_bytes() -> bytes:
-    """最小合法 PNG（1x1 像素）。"""
+def make_png_bytes(salt: bytes = b"") -> bytes:
+    """最小合法 PNG（1x1 像素）。
+
+    ``salt``：用于生成**内容不同**的 PNG（避免同 Subject 上传触发去重 409）。
+    """
     import struct
     import zlib
 
@@ -258,7 +270,8 @@ def make_png_bytes() -> bytes:
         )
 
     ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
-    idat = zlib.compress(b"\x00\xff\x00\x00")
+    # salt 参与像素数据：内容不同的 PNG（去重 hash 不同）
+    idat = zlib.compress(b"\x00\xff\x00\x00" + salt)
     return (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", ihdr)

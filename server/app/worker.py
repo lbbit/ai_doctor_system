@@ -15,7 +15,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.common.ids import new_id
@@ -23,6 +23,7 @@ from app.common.logging import setup_logging
 from app.config.settings import settings
 from app.db.models import Document, ExtractionJob
 from app.db.session import SessionLocal, get_session
+from app.documents.state import processing_of, set_processing_status
 from app.preprocessing.pipeline import process_job
 from app.preprocessing.queue import dequeue_extract, enqueue_extract
 
@@ -45,9 +46,11 @@ def _sweep_stale_jobs(max_age_seconds: int = 10) -> None:
         stale = (
             db.execute(
                 select(ExtractionJob)
+                .join(Document, Document.id == ExtractionJob.document_id)
                 .where(
                     ExtractionJob.state == "queued",
                     ExtractionJob.created_at < cutoff,
+                    Document.deleted_at.is_(None),
                 )
                 .order_by(ExtractionJob.created_at)
                 .limit(10)
@@ -87,9 +90,10 @@ def recover_stale_jobs(db: Session, limit: int = 20) -> dict:
         if _recover_one(db, job, now, stats):
             stats["requeued"] += 1
 
-    # 孤儿文档：extracting 但没有任何 running/queued job（进程在写 job 前崩溃）。
-    # 正常流程里 process_job 会把 document.status=extracting 与 job.state=running 放在同一事务，
-    # 所以“extracting 且无在跑任务”必然是中断残留，可安全回收。
+    # 孤儿文档：processing 但没有任何 running/queued job（进程在写 job 前崩溃）。
+    # 正常流程里 process_job 会把 document 的处理状态置为 processing 与 job.state=running
+    # 放在同一事务，所以"processing 且无在跑任务"必然是中断残留，可安全回收。
+    # 迁移期：活跃文档以旧列 `status` 为权威，归档行以新列为准，因此两处都匹配。
     busy_ids = set(
         db.execute(
             select(ExtractionJob.document_id).where(
@@ -103,8 +107,14 @@ def recover_stale_jobs(db: Session, limit: int = 20) -> dict:
         db.execute(
             select(Document)
             .where(
-                Document.status == "extracting",
                 Document.deleted_at.is_(None),
+                or_(
+                    Document.processing_status == "processing",
+                    and_(
+                        Document.processing_status.is_(None),
+                        Document.status == "extracting",
+                    ),
+                ),
             )
             .limit(limit)
         )
@@ -141,6 +151,16 @@ def _recover_one(db: Session, job: ExtractionJob, now: datetime, stats: dict) ->
     doc = db.get(Document, job.document_id)
     max_attempts = settings.extract_max_attempts
     error = "抽取任务中断（worker 退出或超时），已自动回收"
+
+    # 软删文档：不再重试、不改写其状态（生命周期策略优先于任务恢复）
+    if doc is not None and doc.deleted_at is not None:
+        job.state = "cancelled"
+        job.error = "document deleted"
+        job.stage = "cancelled"
+        job.finished_at = now
+        db.commit()
+        return False
+
     job.state = "failed"
     job.error = error
     job.stage = "failed"
@@ -151,7 +171,7 @@ def _recover_one(db: Session, job: ExtractionJob, now: datetime, stats: dict) ->
         return False
 
     if job.attempt + 1 >= max_attempts:
-        doc.status = "failed"
+        set_processing_status(doc, "failed")
         doc.failure_reason = (
             f"{error}；已达最大尝试次数（{max_attempts}），请手动输入或稍后重试"
         )
@@ -160,7 +180,7 @@ def _recover_one(db: Session, job: ExtractionJob, now: datetime, stats: dict) ->
         logger.warning("worker.recover_failed doc=%s job=%s", doc.id, job.id)
         return False
 
-    doc.status = "pending"
+    set_processing_status(doc, "pending")
     doc.failure_reason = None
     next_job = ExtractionJob(
         id=new_id(),
@@ -196,8 +216,8 @@ def _safe_process(job_id: str) -> None:
                 from app.db.models import Document
 
                 doc = db.get(Document, job.document_id)
-                if doc is not None and doc.status in ("extracting", "pending"):
-                    doc.status = "failed"
+                if doc is not None and processing_of(doc) in ("processing", "pending"):
+                    set_processing_status(doc, "failed")
                     doc.failure_reason = job.error
             db.commit()
         except Exception:  # noqa: BLE001

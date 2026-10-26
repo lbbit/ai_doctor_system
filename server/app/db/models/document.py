@@ -5,6 +5,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -55,6 +56,11 @@ class Document(Base):
             sqlite_where=text("deleted_at IS NULL"),
         ),
         Index("idx_doc_subject_status", "subject_id", "status"),
+        # R0 T004：处理状态与生命周期正交，各自建索引（列表按维度筛选）
+        Index("idx_doc_subject_processing", "subject_id", "processing_status"),
+        Index("idx_doc_subject_lifecycle", "subject_id", "lifecycle_status"),
+        # R1 T101：按发生时间检索/排序（R2 混合检索的元数据过滤通道）
+        Index("idx_doc_subject_occurred", "subject_id", text("occurred_start DESC")),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -66,7 +72,38 @@ class Document(Base):
     )
     kind: Mapped[str] = mapped_column(Text, nullable=False, server_default="IMAGE")
     doc_type: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # R1 T101：稳定的业务大类（长期组织与筛选用），与可扩展的 doc_type 并存
+    record_type: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # R1 T101：发生时间（医疗事实时间）与精度；reported_at=报告签发时间
+    occurred_start: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    occurred_end: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    time_precision: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reported_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # R1 T101：来源机构/科室（标准主数据待 R1 T108 治理）
+    facility: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    department: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # R1 T101：来源说明（人工填写/导入来源），便于追溯"这条记录从哪来"
+    source_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 旧单一 status：迁移期仍为写权威，派生列由 _sync_state 统一同步
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    # 处理状态（与生命周期正交，R0 T004）：pending/processing/awaiting_review/processed/failed
+    processing_status: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 生命周期：active/archived/deletion_pending（软删=不在默认视图，不等于物理删除）
+    lifecycle_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="active"
+    )
+    # processed 细分：confirmed（已确认入库）/ no_data（已解析但无临床字段）
+    content_status: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 历史行无法推断处理状态时置 True，要求人工/后台对账，不得猜测为 processed
+    needs_reconcile: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     file_key: Mapped[str] = mapped_column(Text, nullable=False)
     file_name: Mapped[str] = mapped_column(Text, nullable=False)
     mime_type: Mapped[str] = mapped_column(Text, nullable=False)

@@ -72,12 +72,18 @@ R3 可先基于结构化记录实现 `record_search/observation_series`，但“
 
 ### T001 建立当前事实仪表盘与文档优先级
 
+- **状态**：✅ 已完成（2026-10-26）
+
 - **文件**：`PLAN.md`、`docs/PRD.md`、`docs/ARCHITECTURE.md`、本设计/计划。
 - 将当前测试/KPI/待办集中到 PLAN 顶部，历史记录保留但不作为当前状态；PRD 管 AC，ARCHITECTURE 管规范架构，设计/ADR 管新决策。
 - 校验：文档链接存在；“已实现/目标/待验证”无混写；K1/K2 标清 38 份/37 异常与未重测日期。
 - 完成定义：维护者只读 PLAN 顶部即可获得真实当前状态，不会被旧“待样本/全部完成”误导。
 
 ### T002 冻结评测口径并建立独立留出集
+
+- **状态**：✅ 口径已冻结（2026-10-26）；留出集仍缺（B-4 阻塞项）
+- **实际落地**：`score_kpi.py` 新增 `MIN_K3_QUESTIONS=20` 完整性门槛、K1 精确率/宏平均/分层、`load_manifest`；新增 `evals/dataset/kpi_k1k2/manifest.json`；新增 `evals/tests/test_score_kpi_contract.py`（10 例）。
+- **修正的度量缺陷**：精确率初版口径与命中不一致（"白细胞计数"对标注"白细胞"被误判多余 → 虚报 51%），改为复用同一匹配语义后为 97.27%；K1/K2 数值不变。
 
 - **文件**：`evals/README.md`、`evals/dataset/manifest.schema.json`（新）、`evals/scripts/check_annotations.py`、`evals/scripts/score_kpi.py`。
 - manifest 记录 `dataset_version, annotation_version, scorer_version, prediction_version, model_profile, sample_counts, split`；K3 不足 20 个且有人工 verdict 时不得给出通过率。
@@ -87,6 +93,8 @@ R3 可先基于结构化记录实现 `record_search/observation_series`，但“
 
 ### T003 修复软删/归档读取与后台再处理
 
+- **状态**：✅ 已完成（2026-10-26）
+
 - **代码**：`server/app/documents/{service,router,storage}.py`、`server/app/preprocessing/{pipeline,review}.py`、`server/app/worker.py`。
 - 假设根因：`select_owned` 与任务查询只看所有权/状态，未统一过滤 `deleted_at`；先以当前代码复现，不凭审计结论直接改。
 - **RED**：`server/tests/api/test_document_lifecycle.py`（新）覆盖软删后详情/derived/content/pages/retry/reextract；`test_job_recovery.py` 覆盖软删任务不恢复；`test_extraction_pipeline.py` 覆盖 job 开始时已删除则取消且不产生新草稿。
@@ -94,6 +102,10 @@ R3 可先基于结构化记录实现 `record_search/observation_series`，但“
 - 同时验证归档的既定策略，不允许“恢复归档”意外改变已确认处理状态。
 
 ### T004 生命周期与处理状态兼容迁移设计
+
+- **状态**：✅ 代码完成（2026-10-26）；迁移整链待真实 PostgreSQL 验证（B-1 阻塞项）
+- **实际落地**：`server/app/documents/state.py`（单一状态权威）、迁移 `0007`、`POST /api/documents/{id}/restore`、前端双维度展示、`docs/adr/0001-document-lifecycle-and-assets.md`。
+- **关键决策**：旧 `status` 保留为**派生投影**（活跃文档以旧列为兼容权威，归档文档以新列保留"已确认"），迁移期新旧列由 `state.py` 单一同步点维护。
 
 - **文件**：`docs/adr/0001-document-lifecycle-and-assets.md`（新）、`server/app/db/models/document.py`、`server/app/documents/schemas.py`、后续 Alembic migration（编号实施时取当前 head 后继，禁止预设冲突编号）。
 - 明确旧状态映射：`extracting→processing`、`confirmed/parsed_no_data→processed`；旧 `archived` 需结合 `archived_at/deleted_at` 回填生命周期，并尽可能保留最后处理状态，未知时映射为 `pending + needs_reconcile=true`，不得猜测为 `processed`。
@@ -104,6 +116,8 @@ R3 可先基于结构化记录实现 `record_search/observation_series`，但“
 
 ### T005 全链路出域隐私与不可信内容基线
 
+- **状态**：✅ 文本出域已加固（2026-10-26）；图像出域策略待评审（B-2 阻塞项）
+
 - **代码**：`server/app/chat/orchestration.py`、`server/app/agent/{planner,tools,search}.py`、`server/app/sanitizer/`、`server/app/preprocessing/`、`server/app/llm/`；建立出域调用注册清单，R2 embedding 必须复用同一网关。
 - 盘点上传 OCR/VLM、结构化、指标/药品主数据对齐、embedding、聊天规划、网页查询、原件复读全部云端路径；文本脱敏与图像授权/本地处理是不同控制。
 - **RED**：规划器原始问题含姓名/电话、搜索 query 含 Subject 名/精确日期、搜索结果标题与 URL 含敏感串；上传图像/embedding 绕过网关；病历/网页写“忽略规则并调用工具”不得改变计划。
@@ -113,6 +127,14 @@ R3 可先基于结构化记录实现 `record_search/observation_series`，但“
 
 ### T006 R0 出口评审
 
+- **状态**：🟡 部分完成（2026-10-26）——测试全绿，迁移整链验证待补
+- **验证结果**（当前树新鲜执行）：
+  - 后端 `pytest`：**674 passed**，EXIT=0（基线 641 → +33）
+  - 前端 `vitest`：**126 passed**（+6），`npm run build` 通过，EXIT=0
+  - 评测 `score_kpi.py selftest`：OK，EXIT=0；契约测试 10 passed
+  - K1/K2 复跑：**281/282、37/37** 不变；新增 K1_precision 97.27%、K1_macro 99.24%
+  - 迁移 `0007` 回填逻辑：4 例等价 SQL 单测通过（SQLite），**整链未在真实 PostgreSQL 验证**
+
 - 命令：`cd server; ..\.venv\Scripts\python.exe -m pytest -q`、`cd web; npm test; npm run build`。
 - 离线注入/隔离、历史迁移、当前 K1/K2 全通过；不能复跑真实服务时在 PLAN 标阻塞。
 - ADR 至少确认：状态正交、默认归档不物理删除、图像出域默认禁止、临床事实继续 HITL。
@@ -120,6 +142,11 @@ R3 可先基于结构化记录实现 `record_search/observation_series`，但“
 ## 4. R1 — 健康资产与 Markdown（T101–T108）
 
 ### T101 文档类型、时间与来源元数据
+
+- **状态**：✅ 已完成（2026-10-26）
+- **实际落地**：新增 `server/app/common/timeline.py`（时间语义单一权威：六种精度、区间比较、稳定排序）；`documents` 新增 `record_type/occurred_start/occurred_end/time_precision/reported_at/facility/department/source_note`（迁移 `0008`）；`observations` 新增 `specimen/method`；上传 API 支持用户填写来源元数据；列表改按**发生时间**排序（未知时间排最后）。
+- **关键决策**：用户填写优先于 AI 推断（逐字段判断，重抽不覆盖）；未填日期一律 `unknown`，**不把上传时间当发生时间**；历史行不伪造发生时间。
+- **测试**：`tests/unit/test_timeline_semantics.py`(16)、`tests/api/test_document_metadata.py`(9)。
 
 - **文件**：`server/app/db/models/{document,event,observation}.py`、`server/app/documents/{schemas,service}.py`、新 migration。
 - 追加 `record_type/document_subtype`、`occurred_start/occurred_end/time_precision/reported_at`、`facility/department/source_metadata`；观察补充 `specimen/method`（若已有字段则复用）。
@@ -129,6 +156,11 @@ R3 可先基于结构化记录实现 `record_search/observation_series`，但“
 - 验收：API/迁移/时间筛选和趋势测试通过，历史行可升级。
 
 ### T102 `DocumentAsset` 与资产存储服务
+
+- **状态**：✅ 已完成（2026-10-26）
+- **实际落地**：新增 `server/app/db/models/document_asset.py` 与 `server/app/documents/assets.py`（版本化登记、hash 校验、stale 判定、幂等原件登记）；迁移 `0009`；新增 `GET /api/documents/{id}/assets` 与 `GET /api/documents/{id}/assets/{role}`。
+- **关键决策**：派生资产**追加版本不覆盖**（旧版可对比）；`original` 不可经派生接口写入；读取做 hash 校验（内容被篡改 → 404，不返回不可信副本）；原件沿用 `documents.file_key`，迁移期**不移动原对象**。
+- **测试**：`tests/unit/test_document_assets.py`(10，含 API 层）。
 
 - **新文件**：`server/app/db/models/document_asset.py`、`server/app/documents/assets.py`、`server/tests/unit/test_document_assets.py`。
 - 建议接口：
@@ -145,6 +177,11 @@ R3 可先基于结构化记录实现 `record_search/observation_series`，但“
 
 ### T103 页块与来源锚点
 
+- **状态**：✅ 已完成（2026-10-26）
+- **实际落地**：新增 `server/app/db/models/document_block.py` 与 `server/app/preprocessing/anchors.py`；迁移 `0010`；抽取完成后自动落页块（R1 T104 管线集成）。
+- **关键决策**：坐标不可信时只给**页级**锚点（`anchor_status=page_only`），**不伪造 bbox**；锚点**绑定抽取版本**，重抽不改变旧引用的解释；`source_field_ref` 仅下标时**不猜测**位置。
+- **测试**：`tests/unit/test_anchors.py`(7)。
+
 - **新文件**：`server/app/db/models/document_block.py`（或 page 表扩展，由 ADR 决定）、`server/app/preprocessing/anchors.py`。
 - 页块字段：`document_id,asset_id,asset_version,extraction_version,page_no,block_id,text,bbox,coordinate_system,parser_version`；锚点绑定不可变资产/抽取版本，唯一键至少含版本与 `(document_id,page_no,block_id)`，坐标允许空但需 `anchor_status`。
 - 适配现有表格/OCR/VLM 输出；无可靠 bbox 时只保证页级，不生成伪坐标。`EvidenceRef` 固定同一资产版本，重抽不得改变旧引用的解释。
@@ -152,6 +189,11 @@ R3 可先基于结构化记录实现 `record_search/observation_series`，但“
 - 验收：任一结构化草稿项可定位文档、版本与页；已有 bbox 时可回链区域。
 
 ### T104 类型化 Markdown 生成器
+
+- **状态**：✅ 已完成（2026-10-26）
+- **实际落地**：新增 `server/app/preprocessing/markdown.py`（8 种模板：检验/病历/出院小结/体检/影像/用药/文本/通用）；已接入抽取管线（`_store_anchors_and_markdown`），抽取完成即产出**版本化 Markdown 副本**资产。
+- **关键决策**：结构由**代码**生成（模型不得重排表格列序与原文顺序）；每页带 `<!-- source:page=N -->` 锚点；影像类**只写报告所见/结论 + 原件引用**，不把 VLM 观察当报告结论；用药类附“不构成用药建议”；副本生成失败**不阻断**抽取。
+- **测试**：`tests/unit/test_markdown_render.py`(14) + `tests/integration/test_extraction_pipeline.py` 新增 2 例（端到端产出 + 重抽版本自增）。
 
 - **新文件**：`server/app/preprocessing/markdown/{service,schema,renderer}.py` 及 `templates/`；扩展现有 `pipeline.py`。
 - `render(document, pages, extraction) -> MarkdownArtifact`；稳定标题、表格、页锚、front matter；文本与 AI 解释分栏。
@@ -161,6 +203,11 @@ R3 可先基于结构化记录实现 `record_search/observation_series`，但“
 - 验收：TXT/MD 原样可读、PDF/图片副本可预览下载；schema 无内容时失败而非空白“已处理”。
 
 ### T105 文本文件与批量导入
+
+- **状态**：✅ 已完成（2026-10-26）
+- **实际落地**：上传白名单扩展到 TXT/MD/Markdown（`kind=TEXT`）；纯文本按**内容**校验（不可解码的二进制 → 415）；`_build_text_pages` 按空行/长度分逻辑页；新增 `POST /api/documents/batch` 批量接口。
+- **关键决策**：批量**逐项返回**结果（单项失败不回滚已成功原件）；缺 Subject 时**整体 422**（不逐项报错）。
+- **测试**：`tests/api/test_text_and_batch_upload.py`(8)。
 
 - **代码**：`documents/router.py`、`preprocessing/pipeline.py`、现有 `web/src/pages/ArchivePage.tsx`；可新增 `web/src/components/documents/UploadDropzone.tsx` 抽离上传逻辑（当前该组件不存在）。
 - 支持 UTF-8/常见中文编码的 TXT/MD（检测失败要求用户选择），JPG/PNG/PDF 保持；魔数、扩展、大小/页数、批量每文件错误校验。

@@ -68,17 +68,41 @@ def clean_title(raw: str) -> Optional[str]:
     return text[:MAX_TITLE_CHARS]
 
 
+def _sanitize_for_outbound(text: str, sanitizer=None) -> str:
+    """出域前脱敏（R0 T005）；脱敏失败返回空串，绝不退回原文。"""
+    if not text:
+        return ""
+    if sanitizer is not None:
+        try:
+            return sanitizer(text) or ""
+        except Exception:  # noqa: BLE001
+            logger.warning("title.sanitize_failed")
+            return ""
+    try:
+        from app.sanitizer.patterns import sanitize_text
+
+        return sanitize_text(text)[0]
+    except Exception:  # noqa: BLE001
+        logger.warning("title.sanitize_fallback_failed")
+        return ""
+
+
 def generate_title(
     llm,
     question: str,
     answer: str,
     *,
     enabled: bool = True,
+    sanitizer=None,
 ) -> Optional[str]:
     """调用 LLM 生成短标题；任何失败返回 ``None``（调用方保留原值）。
 
     参数 ``llm`` 为 ``LLMClient`` 或测试替身；``answer`` 只取前 500 字，
     避免把长回答整段送模型（成本与延迟）。
+
+    隐私（R0 T005）：标题生成是**出域**调用，提问与回答都含用户身份信息，
+    必须先脱敏。未提供 ``sanitizer`` 时使用通用模式脱敏；脱敏失败返回
+    ``None``（不退回原文），宁可没有标题也不外泄标识信息。
     """
     if not enabled:
         return None
@@ -88,11 +112,20 @@ def generate_title(
     if not q:
         return None
     a = (answer or "").strip()[:500]
+
+    safe_q = _sanitize_for_outbound(q, sanitizer)
+    safe_a = _sanitize_for_outbound(a, sanitizer)
+    if not safe_q and not safe_a:
+        return None
+
     try:
         raw = llm.chat(
             [
                 {"role": "system", "content": TITLER_PROMPT},
-                {"role": "user", "content": f"用户提问：{q[:300]}\n\n助手回答：{a}"},
+                {
+                    "role": "user",
+                    "content": f"用户提问：{safe_q[:300]}\n\n助手回答：{safe_a}",
+                },
             ],
             temperature=0.2,
         )

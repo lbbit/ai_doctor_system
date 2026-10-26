@@ -68,13 +68,38 @@ class ToolBundle:
         return text[:MAX_TOTAL_CHARS]
 
 
+def _source_host(url: str) -> str:
+    """只取来源域名（隐私：URL 路径常含用户标识，不应进入模型上下文）。"""
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        return parsed.hostname or url[:60]
+    except Exception:  # noqa: BLE001
+        return url[:60]
+
+
 def _clean_query(query: str) -> str:
-    """搜索查询清理：去掉可能的注入指令与超长内容。"""
+    """搜索查询清理：去标识信息与明显的提示注入尝试。
+
+    隐私（R0 T005）：检索词会**出域**到第三方搜索源，因此这里做与
+    `planner._build_query` 一致的去标识（证件号/电话/邮箱/精确日期/中文人名），
+    并剔除明显的注入指令。查询越"医学概念化"，外部服务能获得的患者信息越少。
+    """
     text = re.sub(r"\s+", " ", (query or "")).strip()
     text = text[:200]
-    # 去掉明显的提示注入尝试
-    text = re.sub(r"(?i)(ignore previous|system prompt|忽略以上|忽略之前)", "", text)
-    return text.strip()
+    # 标识信息
+    text = re.sub(r"(?<!\d)\d{17}[\dXx](?!\d)", " ", text)
+    text = re.sub(r"(?<!\d)1[3-9]\d{9}(?!\d)", " ", text)
+    text = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", " ", text)
+    text = re.sub(r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日", " ", text)
+    # 明显的提示注入尝试
+    text = re.sub(
+        r"(?i)(ignore previous|system prompt|忽略以上|忽略之前|忽略上述)", " ", text
+    )
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def execute_tools(
@@ -145,13 +170,22 @@ def execute_tools(
 
         lines: List[str] = []
         for i, r in enumerate(results, start=1):
+            # 隐私（R0 T005）：标题与摘要会进入 prompt，必须脱敏；URL 只送**域名**
+            # ——完整路径里常含用户标识（如以患者姓名命名的页面），模型无需知道
+            # 具体路径，也不应看到。完整 URL 仍保留在 results 中供用户端引用。
+            title = r.title
             snippet = r.snippet
             if sanitizer is not None:
-                try:
-                    snippet = sanitizer(snippet)
-                except Exception:  # noqa: BLE001
-                    pass
-            lines.append(f"[{i}] {r.title}\n{snippet}\n来源：{r.url}")
+                for attr in ("title", "snippet"):
+                    try:
+                        cleaned = sanitizer(getattr(r, attr) or "")
+                    except Exception:  # noqa: BLE001
+                        cleaned = ""
+                    if attr == "title":
+                        title = cleaned
+                    else:
+                        snippet = cleaned
+            lines.append(f"[{i}] {title}\n{snippet}\n来源：{_source_host(r.url)}")
         bundle.outcomes.append(
             ToolOutcome(
                 name=call.name,

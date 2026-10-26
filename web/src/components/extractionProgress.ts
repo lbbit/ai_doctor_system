@@ -1,6 +1,15 @@
 /** 抽取阶段与进度的展示映射（F-05 体验：让用户看见“在做什么、还剩多少”）。 */
 
-import type { DocStatus, ExtractionJob } from '../types/api';
+import {
+  LIFECYCLE_STATUS_LABELS,
+  PROCESSING_STATUS_LABELS,
+} from '../types/api';
+import type {
+  DocStatus,
+  ExtractionJob,
+  LifecycleStatus,
+  ProcessingStatus,
+} from '../types/api';
 
 export const STAGE_LABELS: Record<string, string> = {
   loading: '读取原件',
@@ -68,4 +77,48 @@ export function listStatusNote(status: DocStatus, job?: ExtractionJob | null): s
   const pct = progressPercent(job);
   if (pct != null) return `识别中 ${pct}%（${job.progress.done}/${job.progress.total} 页）`;
   return '识别中…';
+}
+
+/**
+ * 状态展示文案（R0 T004）：处理状态与生命周期分列显示。
+ *
+ * 归档不再覆盖"已确认"：一份已确认入库的文档归档后应显示"已归档 · 已确认"，
+ * 而不是含糊的"已归档"（旧实现会丢掉临床事实状态）。
+ */
+export function documentStatusLabels(doc: {
+  processingStatus?: ProcessingStatus;
+  lifecycleStatus?: LifecycleStatus;
+  contentStatus?: 'confirmed' | 'no_data' | null;
+  status?: DocStatus;
+}): { primary: string; lifecycle: string | null; needsReconcile: boolean } {
+  const legacy = doc.status ?? 'pending';
+  let processing: ProcessingStatus;
+  let content: 'confirmed' | 'no_data' | null = doc.contentStatus ?? null;
+
+  if (doc.processingStatus) {
+    processing = doc.processingStatus;
+  } else if (legacy === 'extracting') {
+    processing = 'processing';
+  } else if (legacy === 'confirmed') {
+    processing = 'processed';
+    content = content ?? 'confirmed';
+  } else if (legacy === 'parsed_no_data') {
+    processing = 'processed';
+    content = content ?? 'no_data';
+  } else {
+    processing = legacy as ProcessingStatus;
+  }
+
+  const lifecycle: LifecycleStatus =
+    doc.lifecycleStatus ?? (legacy === 'archived' ? 'archived' : 'active');
+
+  let primary = PROCESSING_STATUS_LABELS[processing];
+  if (processing === 'processed') {
+    primary = content === 'confirmed' ? '已确认' : '已解析无事件';
+  }
+  return {
+    primary,
+    lifecycle: lifecycle === 'active' ? null : LIFECYCLE_STATUS_LABELS[lifecycle],
+    needsReconcile: Boolean((doc as { needsReconcile?: boolean }).needsReconcile),
+  };
 }

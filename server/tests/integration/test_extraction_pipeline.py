@@ -17,6 +17,93 @@ def _upload(client, auth, content, name, mime):
     return resp.json()["data"]["document"]
 
 
+def test_extraction_produces_markdown_asset_and_anchors(
+    db, client, auth, fake_storage
+):
+    """抽取完成后应产出**版本化 Markdown 副本**与页级锚点（R1 T103/T104）。
+
+    这是"输入文档要存档、也要处理成可读副本"的核心落地：
+    - 副本登记为 `markdown` 角色资产，版本号自增；
+    - 内容含 front matter 与页锚点；
+    - 页块（来源锚点）落库，可定位到页；
+    - 副本生成失败**不阻断**抽取（派生产物可重建）。
+    """
+    from app.db.models import Document, DocumentAsset, DocumentBlock
+    from app.documents import assets as asset_service
+
+    content = make_pdf_with_text(
+        "2026-03-12 Checkup Report\nGLU 5.2 mmol/L 3.9-6.1\nALT 45 U/L 9-50"
+    )
+    doc = _upload(client, auth, content, "lab.pdf", "application/pdf")
+    job = db.query(ExtractionJob).filter_by(document_id=doc["id"]).one()
+
+    process_job(db, job.id)
+
+    db.expire_all()
+    # Markdown 资产已登记
+    assets = (
+        db.query(DocumentAsset)
+        .filter_by(document_id=doc["id"], role="markdown")
+        .all()
+    )
+    assert assets, "抽取后应产出 Markdown 副本资产"
+    assert assets[0].version == 1
+    assert assets[0].generator.startswith("markdown/")
+
+    # 内容可读且带锚点
+    asset, data = asset_service.read_asset(
+        db, db.get(Document, doc["id"]), "markdown"
+    )
+    text = data.decode("utf-8")
+    assert text.startswith("---\n")
+    assert "documentId:" in text
+    assert "<!-- source:page=" in text
+
+    # 页块锚点已落库
+    blocks = db.query(DocumentBlock).filter_by(document_id=doc["id"]).all()
+    assert blocks, "应落页级来源锚点"
+    assert blocks[0].page_no >= 1
+    # 无可靠坐标时只给页级锚点（不伪造 bbox）
+    assert blocks[0].anchor_status in ("page_only", "region")
+    if blocks[0].anchor_status == "page_only":
+        assert blocks[0].x is None
+
+    # 文档状态仍是待确认（副本生成不改变处理状态）
+    doc_row = db.get(Document, doc["id"])
+    assert doc_row.processing_status == "awaiting_review"
+
+
+def test_markdown_asset_version_increments_on_reextract(
+    db, client, auth, fake_storage
+):
+    """重新抽取产生**新版本**副本，旧版保留（可对比）。"""
+    from app.db.models import Document, DocumentAsset
+
+    content = make_pdf_with_text("2026-03-12 Report\nGLU 5.2 mmol/L 3.9-6.1")
+    doc = _upload(client, auth, content, "lab.pdf", "application/pdf")
+    job = db.query(ExtractionJob).filter_by(document_id=doc["id"]).one()
+    process_job(db, job.id)
+
+    db.expire_all()
+    resp = client.post(
+        f"/api/documents/{doc['id']}/derived-record/reextract",
+        headers=auth["headers"],
+    )
+    assert resp.status_code == 200, resp.text
+    new_job_id = resp.json()["data"]["job"]["id"]
+    process_job(db, new_job_id)
+
+    db.expire_all()
+    assets = (
+        db.query(DocumentAsset)
+        .filter_by(document_id=doc["id"], role="markdown")
+        .order_by(DocumentAsset.version)
+        .all()
+    )
+    assert len(assets) >= 2, "重抽应新增版本副本"
+    assert [a.version for a in assets] == sorted(a.version for a in assets)
+
+
 def test_pdf_rule_parse_offline(db, client, auth, fake_storage):
     """离线（LLM 不可用）：PDF 文本 → RuleParser 抽取 → awaiting_review → 确认入库闭环。"""
     content = make_pdf_with_text(

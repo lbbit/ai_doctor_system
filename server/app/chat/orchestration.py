@@ -286,6 +286,10 @@ def send_message_events(
                     content,
                     max_calls=resolver.get_int(db, "agent.max_tool_calls", 3),
                     enabled=agent_enabled,
+                    # 隐私（R0 T005）：规划内容出域前必须脱敏
+                    sanitizer=lambda text: sanitize_with_subject(
+                        db, account, subject, text
+                    ).text,
                 )
             else:
                 logger.info("agent.plan.rule reason=%s", plan.reason)
@@ -441,6 +445,10 @@ def send_message_events(
                 get_llm_client("extraction", db=db),
                 content,
                 assistant_msg.content,
+                # 隐私（R0 T005）：标题生成是出域调用，提问/回答都需脱敏
+                sanitizer=lambda text: sanitize_with_subject(
+                    db, account, subject, text
+                ).text,
             )
             if new_title:
                 # 用 Core UPDATE 直接落库：ORM 身份映射在多段 commit 后可能持有

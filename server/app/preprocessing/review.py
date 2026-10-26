@@ -30,6 +30,11 @@ from app.db.models import (
     Observation,
 )
 from app.documents.service import assert_transition
+from app.documents.state import (
+    content_of,
+    processing_of,
+    set_processing_status,
+)
 from app.preprocessing.queue import enqueue_extract
 from app.preprocessing.schemas import ConfirmRequest, DecisionIn
 
@@ -166,10 +171,11 @@ def confirm_derived_record(
         raise NotFoundError("暂无抽取草稿")
     if data.version != dr.version:
         raise ReviewConflictError()
-    if document.status == "confirmed":
+    current_processing = processing_of(document)
+    if current_processing == "processed" and content_of(document) == "confirmed":
         raise ReviewConflictError("该报告已确认入库，请刷新查看")
-    if document.status != "awaiting_review":
-        raise StateInvalidError(f"当前状态 {document.status} 不可确认入库")
+    if current_processing != "awaiting_review":
+        raise StateInvalidError(f"当前状态 {current_processing} 不可确认入库")
 
     payload = dr.payload
     events = payload.get("events") or []
@@ -309,11 +315,13 @@ def confirm_derived_record(
         obs_raw["status"] = "confirmed" if decision.action == "confirm" else "corrected"
         applied_decisions[ref] = {"action": decision.action}
 
-    # ---- 状态机转移（§3.3）----
+    # ---- 状态机转移（§3.3；处理状态与生命周期正交）----
     has_content = bool(created_events or created_obs)
-    target = "confirmed" if has_content else "parsed_no_data"
-    assert_transition(document.status, target)
-    document.status = target
+    set_processing_status(
+        document,
+        "processed",
+        content_status="confirmed" if has_content else "no_data",
+    )
     document.review_version += 1
     dr.confirmed_at = datetime.now(timezone.utc)
     payload["_decisions"] = applied_decisions
@@ -333,13 +341,16 @@ def confirm_derived_record(
         subject_id=document.subject_id,
         before={
             "status": "awaiting_review",
+            "processingStatus": "awaiting_review",
             "reviewVersion": document.review_version - 1,
             "decisions": {
                 k: v.get("action") for k, v in applied_decisions.items()
             },
         },
         after={
-            "status": target,
+            "status": document.status,
+            "processingStatus": processing_of(document),
+            "contentStatus": content_of(document),
             "reviewVersion": document.review_version,
             "eventIds": [e.id for e in created_events],
             "observationIds": [o.id for o in created_obs],
@@ -357,10 +368,12 @@ def confirm_derived_record(
         db.refresh(o)
     logger.info(
         "record.confirmed doc=%s status=%s events=%s obs=%s",
-        document.id, target, len(created_events), len(created_obs),
+        document.id, document.status, len(created_events), len(created_obs),
     )
     return {
-        "documentStatus": target,
+        "documentStatus": document.status,
+        "processingStatus": processing_of(document),
+        "contentStatus": content_of(document),
         "events": [_event_out(e) for e in created_events],
         "observations": [_obs_out(o) for o in created_obs],
         "auditId": audit.id,
@@ -395,7 +408,8 @@ def reextract(
     if active is not None:
         raise ReviewConflictError("该报告正在处理中，请等待当前任务完成")
 
-    if document.status not in ("awaiting_review", "failed", "parsed_no_data"):
+    current_processing = processing_of(document)
+    if current_processing not in ("awaiting_review", "failed", "processed"):
         raise StateInvalidError("当前状态不支持重新抽取")
 
     current = _current_dr(db, document)
@@ -404,9 +418,8 @@ def reextract(
             ExtractionJob.document_id == document.id
         )
     )
-    previous_status = document.status
-    assert_transition(document.status, "extracting")
-    document.status = "extracting"
+    previous_status = current_processing
+    set_processing_status(document, "processing")
     document.failure_reason = None
     job = ExtractionJob(
         id=new_id(),

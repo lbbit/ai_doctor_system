@@ -133,6 +133,10 @@ class Observation(Base):
     ref_high: Mapped[Optional[float]] = mapped_column(Numeric, nullable=True)
     ref_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     abnormal_flag: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # R1 T101：标本与检测方法——趋势可比性的前提。
+    # 同名指标在不同标本/方法下不可直接连线（如血/尿同名项目）。
+    specimen: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    method: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     occurred_at: Mapped[date] = mapped_column(Date, nullable=False)  # 双时间轴（B-2）
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

@@ -10,6 +10,8 @@ from app.db.models.chat import (
     TraceRef,
 )
 from app.db.models.document import Document, DocumentPage
+from app.db.models.document_asset import DocumentAsset
+from app.db.models.document_block import DocumentBlock
 from app.db.models.event import MedicalEvent, MedicalEventDocument
 from app.db.models.observation import (
     IndicatorDictionary,
@@ -36,6 +38,8 @@ __all__ = [
     "TraceRef",
     "Document",
     "DocumentPage",
+    "DocumentAsset",
+    "DocumentBlock",
     "MedicalEvent",
     "MedicalEventDocument",
     "IndicatorDictionary",
