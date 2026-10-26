@@ -1,0 +1,46 @@
+# pg_dump 定时备份（§12.2：postgres 数据备份策略；MinIO 版本化另行配置）
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: ai-doctor
+spec:
+  schedule: "0 3 * * *"   # 每天 03:00
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pgdump
+              image: postgres:16-alpine
+              command:
+                - sh
+                - -c
+                - |
+                  set -e
+                  TS=$(date +%Y%m%d-%H%M%S)
+                  pg_dump "$DATABASE_URL" | gzip > /backup/aidoctor-$TS.sql.gz
+                  ls -t /backup/aidoctor-*.sql.gz | tail -n +8 | xargs -r rm --
+              env:
+                - name: DATABASE_URL
+                  value: "postgresql://aiuser:aipass@postgres:5432/aidoctor"
+                - name: PGPASSWORD
+                  valueFrom: { secretKeyRef: { name: ai-doctor-secret, key: POSTGRES_PASSWORD } }
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+          volumes:
+            - name: backup
+              persistentVolumeClaim: { claimName: postgres-backup }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-backup
+  namespace: ai-doctor
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: { requests: { storage: 10Gi } }

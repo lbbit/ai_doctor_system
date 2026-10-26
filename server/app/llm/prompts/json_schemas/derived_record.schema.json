@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "derived_record",
+  "type": "object",
+  "required": ["observations"],
+  "properties": {
+    "report_date": {
+      "type": ["string", "null"],
+      "description": "报告内检查日期 YYYY-MM-DD（双时间轴：与上传日期区分）"
+    },
+    "doc_type_suggest": {
+      "type": "string",
+      "enum": ["lab_report", "imaging_report", "visit_record", "other", ""]
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["visit", "hospitalization", "surgery", "checkup",
+                     "medication", "vaccine", "self_reported", "other"]
+          },
+          "title": {"type": ["string", "null"]},
+          "narrative": {"type": ["string", "null"]},
+          "diagnosis": {"type": ["string", "null"]},
+          "department": {"type": ["string", "null"]},
+          "occurred_at": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
+          "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["raw_name"],
+        "properties": {
+          "raw_name": {"type": "string"},
+          "value": {"type": ["number", "string", "null"]},
+          "unit": {"type": ["string", "null"]},
+          "ref_low": {"type": ["number", "null"]},
+          "ref_high": {"type": ["number", "null"]},
+          "ref_text": {"type": ["string", "null"]},
+          "abnormal_flag": {"type": ["string", "null"], "enum": ["N", "L", "H", "A", null]},
+          "occurred_at": {"type": ["string", "null"]},
+          "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+          "bbox": {
+            "type": ["object", "null"],
+            "properties": {
+              "page": {"type": "integer"},
+              "x": {"type": "number"},
+              "y": {"type": "number"},
+              "w": {"type": "number"},
+              "h": {"type": "number"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

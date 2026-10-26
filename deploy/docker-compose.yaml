@@ -1,0 +1,130 @@
+# AI 私人医生系统 — Docker Compose 一键全栈（验收基线，AC-15.1/15.2）
+# 用法：cp deploy/.env.example deploy/.env && docker compose -f deploy/docker-compose.yaml up -d --build
+# 服务：web / api / worker / postgres / redis / minio（六服务）
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    env_file: [".env"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aiuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aipass}
+      POSTGRES_DB: ${POSTGRES_DB:-aidoctor}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aiuser} -d ${POSTGRES_DB:-aidoctor}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    # MinIO 官方镜像已从公共 registry 下架（source-only）；本地构建见 deploy/minio/Dockerfile。
+    # CI/K8s 环境可改为私有 mirror 或 AIStor，保持 S3 API 兼容即可。
+    image: local/minio-source:latest
+    build:
+      context: ./minio
+    restart: unless-stopped
+    env_file: [".env"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    command: ["server", "/data", "--console-address", ":9001"]
+    volumes:
+      - miniodata:/data
+    ports:
+      - "9000:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:9000/minio/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  api:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    env_file: [".env"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aiuser}:${POSTGRES_PASSWORD:-aipass}@postgres:5432/${POSTGRES_DB:-aidoctor}
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+
+  worker:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    env_file: [".env"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aiuser}:${POSTGRES_PASSWORD:-aipass}@postgres:5432/${POSTGRES_DB:-aidoctor}
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+    # ENTRYPOINT 已由 Dockerfile 提供（先 alembic 再 exec）；此处仅覆盖 CMD
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # worker 没有 HTTP 服务，不能继承后端镜像的 /healthz 探针。
+    # Redis 队列消费和 extraction_jobs 心跳由 worker 自身负责。
+    healthcheck:
+      disable: true
+
+  web:
+    build:
+      context: ..
+      dockerfile: web/Dockerfile
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-/api}
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

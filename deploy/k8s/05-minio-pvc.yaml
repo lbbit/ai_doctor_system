@@ -1,0 +1,9 @@
+# MinIO 数据卷（原件证据层，永不物理删除）
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: ai-doctor
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources: { requests: { storage: 20Gi } }

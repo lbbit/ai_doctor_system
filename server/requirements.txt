@@ -1,0 +1,50 @@
+# --- Web 框架 ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20          # 文件上传
+pydantic==2.10.4
+pydantic-settings==2.7.0          # env 配置单例
+
+# --- 数据层 ---
+sqlalchemy==2.0.36                # ORM（同步 session，P0 足够）
+psycopg[binary]==3.2.3
+alembic==1.14.0                   # 迁移
+greenlet==3.1.1
+
+# --- 认证与安全 ---
+python-jose[cryptography]==3.3.0  # JWT 签发/校验
+passlib[bcrypt]==1.7.4
+bcrypt==4.2.1                     # 固定版本避免 passlib 不兼容
+
+# --- 任务队列 ---
+redis==5.2.1
+
+# --- 对象存储 ---
+minio==7.2.12
+
+# --- LLM 接入（OpenAI 兼容网关） ---
+openai==1.59.6                    # base_url 可指向 NewAPI/Ollama/直连
+
+# --- 文件处理 ---
+pypdf==5.1.0                      # PDF 页转图/文本兜底（P0 规则解析）
+Pillow==11.1.0                    # 图片归一化（EXIF 方向、缩放、灰度）
+pypdfium2==4.30.0                 # PDF 逐页渲染为图片（VLM 逐页识别，避免整份超时）
+pdfplumber==0.11.4                # PDF 表格直读（确定性抽取：检查项目/结果/单位/参考区间）
+# OCR 兜底：扫描件/模糊拍照件 → OCR 文本 → 结构化（Python>=3.13 暂不支持该包，自动跳过）
+rapidocr-onnxruntime==1.4.4; python_version < "3.13"
+onnxruntime==1.20.1; python_version < "3.13"
+# 容器内无 X11：必须用 headless 版 opencv（rapidocr 依赖 cv2）
+opencv-python-headless==4.10.0.84; python_version < "3.13"
+# 备选：系统 tesseract + pytesseract（chi_sim+eng），未安装时 available()=False 自动跳过
+python-magic==0.4.27              # MIME 检测（容器内需 libmagic）
+jinja2==3.1.6                     # 提示词模板渲染（§2：jinja2 文本模板）
+
+# --- 观测 ---
+structlog==24.4.0                 # 结构化日志
+prometheus-client==0.21.1         # /metrics（可选，K8s 友好）
+
+# --- 测试 ---
+pytest==8.3.4
+pytest-asyncio==0.25.2
+httpx==0.28.1                     # TestClient / ASGI 测试
+factory-boy==3.3.1

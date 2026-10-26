@@ -1,0 +1,18 @@
+# K8s 一键应用：kubectl apply -k deploy/k8s
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ai-doctor
+resources:
+  - 00-namespace.yaml
+  - 01-configmap.yaml
+  - 02-secret.yaml
+  - 03-postgres-statefulset.yaml
+  - 04-postgres-service.yaml
+  - 05-minio-pvc.yaml
+  - 06-redis.yaml
+  - 07-minio.yaml
+  - 08-api-deployment.yaml
+  - 09-worker-deployment.yaml
+  - 10-web-deployment.yaml
+  - 11-ingress.yaml
+  - 12-hpa.yaml

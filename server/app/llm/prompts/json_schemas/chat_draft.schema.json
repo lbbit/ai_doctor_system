@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "chat_draft",
+  "type": "object",
+  "required": ["reply", "has_draft"],
+  "properties": {
+    "reply": {
+      "type": "string",
+      "description": "给用户的自然语言回复（不含处方/诊断结论）"
+    },
+    "has_draft": {
+      "type": "boolean",
+      "description": "用户消息是否包含记录意图（先录入/帮记/记一下/补充档案等）"
+    },
+    "draft": {
+      "type": ["object", "null"],
+      "properties": {
+        "event": {
+          "type": ["object", "null"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["visit", "hospitalization", "surgery", "checkup",
+                       "medication", "vaccine", "self_reported", "other"]
+            },
+            "title": {"type": ["string", "null"]},
+            "narrative": {"type": ["string", "null"]},
+            "diagnosis": {"type": ["string", "null"]},
+            "department": {"type": ["string", "null"]},
+            "occurred_at_expression": {
+              "type": ["string", "null"],
+              "description": "消息中的时间原文，如 今天/上周三/2026-03"
+            },
+            "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+          }
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["display_name"],
+            "properties": {
+              "display_name": {"type": "string"},
+              "value": {"type": ["number", "string", "null"]},
+              "unit": {"type": ["string", "null"]},
+              "ref_low": {"type": ["number", "null"]},
+              "ref_high": {"type": ["number", "null"]},
+              "ref_text": {"type": ["string", "null"]},
+              "abnormal_flag": {"type": ["string", "null"], "enum": ["N", "L", "H", "A", null]},
+              "occurred_at_expression": {"type": ["string", "null"]},
+              "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+            }
+          }
+        }
+      }
+    }
+  }
+}
