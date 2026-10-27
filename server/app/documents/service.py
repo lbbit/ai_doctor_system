@@ -470,6 +470,119 @@ def select_document(
     return select_owned(db, account, Document, doc_id, subject_id)
 
 
+def document_markdown(
+    db: Session,
+    account: Account,
+    doc_id: str,
+    subject_id: Optional[str] = None,
+    *,
+    version: Optional[int] = None,
+) -> dict:
+    """取 Markdown 副本正文（R1 T107 文档详情四区之一）。
+
+    直接返回文本而非签名 URL：副本是**服务端已鉴权的派生内容**，走 API 通道
+    避免 MinIO 直连的 CORS/时效脆弱性，也保证归属校验不被绕过。
+    无副本 → 返回 available=False（前端显示"尚未生成"，不报错）。
+    """
+    from app.documents import assets as asset_service
+
+    document = select_document(db, account, doc_id, subject_id)
+    try:
+        asset, data = asset_service.read_asset(
+            db, document, "markdown", version=version
+        )
+    except NotFoundError:
+        return {"available": False}
+    return {
+        "available": True,
+        **asset_service.asset_out(asset, stale=asset_service.is_stale(asset, document)),
+        "content": data.decode("utf-8", errors="replace"),
+    }
+
+
+def document_records(
+    db: Session,
+    account: Account,
+    doc_id: str,
+    subject_id: Optional[str] = None,
+) -> dict:
+    """本文档**已确认**的结构化事实（R1 T107 结构化记录区）。
+
+    只返回未软删（当前有效）的事件与观测；重抽取代后旧版本已软删，不在此列。
+    """
+    from app.db.models import MedicalEvent, Observation
+    from app.preprocessing.review import _event_out, _obs_out
+
+    document = select_document(db, account, doc_id, subject_id)
+    events = list(
+        db.execute(
+            select(MedicalEvent)
+            .where(
+                MedicalEvent.document_id == document.id,
+                MedicalEvent.deleted_at.is_(None),
+            )
+            .order_by(MedicalEvent.occurred_at.desc())
+        ).scalars()
+    )
+    observations = list(
+        db.execute(
+            select(Observation)
+            .where(
+                Observation.source_document_id == document.id,
+                Observation.deleted_at.is_(None),
+            )
+            .order_by(Observation.occurred_at.desc())
+        ).scalars()
+    )
+    return {
+        "events": [_event_out(e) for e in events],
+        "observations": [_obs_out(o) for o in observations],
+    }
+
+
+def document_versions(
+    db: Session,
+    account: Account,
+    doc_id: str,
+    subject_id: Optional[str] = None,
+) -> dict:
+    """处理与版本历史（R1 T107）：草稿版本 + 资产版本 + 最近任务。"""
+    from app.documents import assets as asset_service
+
+    document = select_document(db, account, doc_id, subject_id)
+    drafts = list(
+        db.execute(
+            select(DerivedRecord)
+            .where(DerivedRecord.document_id == document.id)
+            .order_by(DerivedRecord.version.desc())
+        ).scalars()
+    )
+    assets = asset_service.list_assets(db, document)
+    job = db.scalar(
+        select(ExtractionJob)
+        .where(ExtractionJob.document_id == document.id)
+        .order_by(ExtractionJob.created_at.desc())
+        .limit(1)
+    )
+    return {
+        "drafts": [
+            {
+                "id": d.id,
+                "version": d.version,
+                "parser": d.parser,
+                "confirmedAt": d.confirmed_at.isoformat() if d.confirmed_at else None,
+                "createdAt": d.created_at.isoformat() if d.created_at else None,
+            }
+            for d in drafts
+        ],
+        "assets": [
+            asset_service.asset_out(a, stale=asset_service.is_stale(a, document))
+            for a in assets
+        ],
+        "latestJob": _job_out(job) if job else None,
+    }
+
+
 def get_document_detail(
     db: Session,
     account: Account,

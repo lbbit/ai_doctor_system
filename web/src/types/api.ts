@@ -117,6 +117,51 @@ export interface Page<T> {
   totalPages?: number;
 }
 
+/** Markdown 副本（R1 T107 详情四区之一）。 */
+export interface DocumentMarkdown {
+  available: boolean;
+  content?: string;
+  version?: number;
+  generator?: string;
+  stale?: boolean;
+}
+
+/** 本文档已确认的结构化事实（R1 T107）。 */
+export interface DocumentRecords {
+  events: Array<{
+    id: string;
+    eventType: string;
+    title: string | null;
+    occurredAt: string;
+    recordedAt: string | null;
+    documentId: string | null;
+  }>;
+  observations: Array<{
+    id: string;
+    code: string | null;
+    displayName: string;
+    valueNum: number | null;
+    valueText: string | null;
+    unit: string | null;
+    abnormalFlag: string | null;
+    occurredAt: string;
+    confidence: number | null;
+  }>;
+}
+
+/** 处理与版本历史（R1 T107）。 */
+export interface DocumentVersions {
+  drafts: Array<{
+    id: string;
+    version: number;
+    parser: string;
+    confirmedAt: string | null;
+    createdAt: string | null;
+  }>;
+  assets: DocumentAsset[];
+  latestJob: ExtractionJob | null;
+}
+
 export interface ExtractionJob {
   id: string;
   documentId: string;

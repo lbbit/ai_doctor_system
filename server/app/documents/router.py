@@ -300,6 +300,53 @@ def get_document_asset(
 # ---- 抽取与确认 F-05/F-06（§4.2 17-19；实现于 preprocessing/review.py）----
 
 
+@router.get("/{doc_id}/markdown")
+def document_markdown(
+    doc_id: str,
+    request: Request,
+    version: Optional[int] = None,
+    subjectId: Optional[str] = None,
+    account: Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """Markdown 副本正文（R1 T107 四区之一）；跨档/软删 → 404。"""
+    subject_id = resolve_subject_id(db, account, subjectId)
+    return ok_response(
+        service.document_markdown(db, account, doc_id, subject_id, version=version),
+        request,
+    )
+
+
+@router.get("/{doc_id}/records")
+def document_records(
+    doc_id: str,
+    request: Request,
+    subjectId: Optional[str] = None,
+    account: Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """本文档已确认的结构化事实（R1 T107 四区之一）；跨档/软删 → 404。"""
+    subject_id = resolve_subject_id(db, account, subjectId)
+    return ok_response(
+        service.document_records(db, account, doc_id, subject_id), request
+    )
+
+
+@router.get("/{doc_id}/versions")
+def document_versions(
+    doc_id: str,
+    request: Request,
+    subjectId: Optional[str] = None,
+    account: Account = Depends(get_current_account),
+    db: Session = Depends(get_db),
+):
+    """处理与版本历史（R1 T107 四区之一）；跨档/软删 → 404。"""
+    subject_id = resolve_subject_id(db, account, subjectId)
+    return ok_response(
+        service.document_versions(db, account, doc_id, subject_id), request
+    )
+
+
 @router.get("/{doc_id}/derived-record")
 def get_derived_record(
     doc_id: str,

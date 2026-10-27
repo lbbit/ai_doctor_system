@@ -218,3 +218,93 @@ def test_reextract_rejects_duplicate_queue(client, auth, db, fake_storage):
                          headers=auth["headers"])
     assert second.status_code == 409
     assert second.json()["code"] == "REVIEW_CONFLICT"
+
+
+def _confirm_all(client, auth, doc_id, version, obs_actions):
+    """按 obs_actions 列表（confirm/reject）确认指定版本草稿。"""
+    return client.post(
+        f"/api/documents/{doc_id}/derived-record/confirm",
+        headers=auth["headers"],
+        json={
+            "version": version,
+            "decisions": [
+                {"fieldRef": "event:0", "action": "confirm"},
+            ] + [
+                {"fieldRef": f"obs:{i}", "action": a}
+                for i, a in enumerate(obs_actions)
+            ],
+        },
+    )
+
+
+def test_reextract_then_confirm_supersedes_not_conflicts(client, auth, db):
+    """T106：已确认后再重抽并确认新版本，应**原子取代**旧确认事实，
+    而非撞 source_field_ref 唯一约束误报“已在其他页面处理”。
+
+    语义：同一文档同一字段只保留一条**当前有效**（未软删）的 Observation；
+    旧确认记录软删保留（审计可追溯），新记录生效。
+    """
+    from app.documents.state import set_processing_status
+
+    doc, dr = _seed_review_doc(db, auth["account"]["id"], auth["subjectId"])
+
+    # 确认 v1 → 生成已确认 Observation（obs:0 血糖）
+    r1 = _confirm_all(client, auth, doc.id, 1, ["confirm", "reject"])
+    assert r1.status_code == 200, r1.text
+    db.expire_all()
+    v1_obs = db.query(Observation).filter_by(source_document_id=doc.id).all()
+    assert len(v1_obs) == 1
+    v1_id = v1_obs[0].id
+
+    # 模拟重抽产出 v2（同字段），并把文档退回待确认（reextract 语义）
+    import copy
+    v2_payload = copy.deepcopy(dr.payload)
+    v2_payload["observations"][0]["value"] = 6.5  # 新值
+    v2 = DerivedRecord(
+        id=new_id(), document_id=doc.id, subject_id=doc.subject_id,
+        version=2, payload=v2_payload, parser="rule", overall_confidence=0.9,
+    )
+    db.add(v2)
+    set_processing_status(db.get(Document, doc.id), "awaiting_review")
+    db.commit()
+
+    # 确认 v2 → 应成功（取代 v1），不得 409
+    r2 = _confirm_all(client, auth, doc.id, 2, ["confirm", "reject"])
+    assert r2.status_code == 200, r2.text
+
+    db.expire_all()
+    all_obs = db.query(Observation).filter_by(source_document_id=doc.id).all()
+    active = [o for o in all_obs if o.deleted_at is None]
+    superseded = [o for o in all_obs if o.deleted_at is not None]
+    # 当前有效只有一条（新值 6.5），旧记录软删保留
+    assert len(active) == 1, f"应只 1 条有效观测，实际 {len(active)}"
+    assert float(active[0].value_num) == 6.5
+    assert len(superseded) == 1
+    assert superseded[0].id == v1_id
+
+
+def test_supersede_writes_audit(client, auth, db):
+    """取代旧确认事实必须留审计（B-5），不能静默改写。"""
+    from app.documents.state import set_processing_status
+
+    doc, dr = _seed_review_doc(db, auth["account"]["id"], auth["subjectId"])
+    _confirm_all(client, auth, doc.id, 1, ["confirm", "reject"])
+    db.expire_all()  # 看到 HTTP 会话已提交的 confirmed 状态
+
+    import copy
+    v2 = DerivedRecord(
+        id=new_id(), document_id=doc.id, subject_id=doc.subject_id,
+        version=2, payload=copy.deepcopy(dr.payload), parser="rule",
+    )
+    db.add(v2)
+    set_processing_status(db.get(Document, doc.id), "awaiting_review")
+    db.commit()
+
+    r2 = _confirm_all(client, auth, doc.id, 2, ["confirm", "reject"])
+    assert r2.status_code == 200, r2.text
+    db.expire_all()
+    supersede_logs = db.query(AuditLog).filter(
+        AuditLog.resource_id == doc.id,
+        AuditLog.action.in_(("record.confirm", "record.supersede")),
+    ).count()
+    assert supersede_logs >= 2, "两次确认/取代都应留审计"

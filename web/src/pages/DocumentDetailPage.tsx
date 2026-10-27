@@ -3,6 +3,8 @@ import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import * as pdfjs from 'pdfjs-dist';
 import ConfirmCard from '../components/ConfirmCard';
+import MarkdownMessage from '../components/MarkdownMessage';
+import { stripSourceAnchors } from '../components/markdownTokens';
 import {
   documentStatusLabels,
   estimateHint,
@@ -13,7 +15,12 @@ import {
 } from '../components/extractionProgress';
 import { documentsApi } from '../api/documents';
 import { useSubjectStore } from '../stores/subjectStore';
-import { DerivedRecord } from '../types/api';
+import {
+  DerivedRecord,
+  formatOccurredAt,
+  RECORD_TYPE_LABELS,
+  TIME_PRECISION_LABELS,
+} from '../types/api';
 
 // pdfjs worker（Vite 下用 CDN 源）
 pdfjs.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -56,6 +63,31 @@ export default function DocumentDetailPage() {
   useEffect(() => {
     if (drQuery.data) setDr(drQuery.data);
   }, [drQuery.data]);
+
+  // R1 T107 四区数据：副本 / 已确认结构化事实 / 版本历史
+  // 仅在文档已产出草稿或已确认后拉取（pending/extracting 期无意义）。
+  const settled =
+    !!detail.data &&
+    !['pending', 'extracting'].includes(detail.data.document.status);
+
+  const mdQuery = useQuery({
+    queryKey: ['doc-markdown', documentId, current?.id],
+    queryFn: () => documentsApi.markdown(documentId, current!.id),
+    enabled: Boolean(documentId && current?.id && settled),
+    retry: false,
+  });
+  const recordsQuery = useQuery({
+    queryKey: ['doc-records', documentId, current?.id],
+    queryFn: () => documentsApi.records(documentId, current!.id),
+    enabled: Boolean(documentId && current?.id && settled),
+    retry: false,
+  });
+  const versionsQuery = useQuery({
+    queryKey: ['doc-versions', documentId, current?.id],
+    queryFn: () => documentsApi.versions(documentId, current!.id),
+    enabled: Boolean(documentId && current?.id && settled),
+    retry: false,
+  });
 
   // 原件 URL（带时效）
   useEffect(() => {
@@ -211,13 +243,48 @@ export default function DocumentDetailPage() {
 
       {message && <p className="notice notice--info">{message}</p>}
 
+      {/* 来源元数据（R1 T101）：发生时间按精度展示，未知不伪装 */}
+      <section className="panel doc-meta">
+        <h3>记录信息</h3>
+        <dl className="doc-meta__grid">
+          <div>
+            <dt>发生时间</dt>
+            <dd>{formatOccurredAt(doc)}</dd>
+          </div>
+          <div>
+            <dt>时间精度</dt>
+            <dd>{TIME_PRECISION_LABELS[doc.timePrecision ?? 'unknown']}</dd>
+          </div>
+          <div>
+            <dt>记录类型</dt>
+            <dd>{doc.recordType ? RECORD_TYPE_LABELS[doc.recordType] ?? doc.recordType : '—'}</dd>
+          </div>
+          <div>
+            <dt>来源机构</dt>
+            <dd>{doc.facility ?? '—'}</dd>
+          </div>
+          {doc.department && (
+            <div>
+              <dt>科室</dt>
+              <dd>{doc.department}</dd>
+            </div>
+          )}
+        </dl>
+      </section>
+
+      {/* ① 原件预览（证据层，永不删除） */}
       <section className="panel">
-        <h3>原件预览</h3>
+        <h3>① 原件预览</h3>
         {doc.kind === 'IMAGE' && contentUrl && (
           <img className="doc-preview__image" src={contentUrl} alt={doc.fileName} />
         )}
         {doc.kind === 'PDF' && contentUrl && <PdfPreview url={contentUrl} onError={setPdfError} />}
-        {!contentUrl && <p className="muted">原件链接生成中…（失效会自动刷新）</p>}
+        {doc.kind === 'TEXT' && mdQuery.data?.available && (
+          <p className="muted small">纯文本记录，见下方"Markdown 副本"。</p>
+        )}
+        {!contentUrl && doc.kind !== 'TEXT' && (
+          <p className="muted">原件链接生成中…（失效会自动刷新）</p>
+        )}
         {pdfError && <p className="notice notice--warning">{pdfError}</p>}
         {pageUrls.length > 0 && (
           <div className="doc-preview__pages">
@@ -225,6 +292,124 @@ export default function DocumentDetailPage() {
               <img key={p.pageNo} src={p.url} alt={`第 ${p.pageNo} 页`} />
             ))}
           </div>
+        )}
+      </section>
+
+      {/* ② Markdown 副本（派生、可重建、版本化） */}
+      <section className="panel">
+        <h3>② Markdown 副本</h3>
+        {!settled && <p className="muted">处理完成后生成副本。</p>}
+        {settled && mdQuery.isLoading && <p className="muted">加载副本中…</p>}
+        {settled && mdQuery.data && !mdQuery.data.available && (
+          <p className="muted">该文档尚无 Markdown 副本（可能解析失败或为纯图像件）。</p>
+        )}
+        {settled && mdQuery.data?.available && (
+          <>
+            {mdQuery.data.stale && (
+              <p className="notice notice--warning">
+                源文件已变化，此副本可能过期，建议重新抽取。
+              </p>
+            )}
+            <p className="muted small">
+              生成器 {mdQuery.data.generator} · 版本 v{mdQuery.data.version} ·
+              副本为派生产物，以原件为准
+            </p>
+            <article className="doc-markdown">
+              <MarkdownMessage text={stripSourceAnchors(mdQuery.data.content ?? '')} />
+            </article>
+          </>
+        )}
+      </section>
+
+      {/* ③ 结构化记录（已确认的当前有效事实） */}
+      <section className="panel">
+        <h3>③ 结构化记录（已确认）</h3>
+        {settled && recordsQuery.isLoading && <p className="muted">加载中…</p>}
+        {settled && recordsQuery.data && (
+          <>
+            {recordsQuery.data.events.length === 0 &&
+              recordsQuery.data.observations.length === 0 && (
+                <p className="muted">
+                  暂无已确认记录。{doc.status === 'awaiting_review' ? '请在上方确认草稿。' : ''}
+                </p>
+              )}
+            {recordsQuery.data.events.length > 0 && (
+              <ul className="doc-records__events">
+                {recordsQuery.data.events.map((e) => (
+                  <li key={e.id}>
+                    {e.occurredAt?.slice(0, 10)} · {e.title ?? e.eventType}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {recordsQuery.data.observations.length > 0 && (
+              <div className="table-scroll">
+                <table className="doc-records__table">
+                  <thead>
+                    <tr>
+                      <th>项目</th>
+                      <th>结果</th>
+                      <th>单位</th>
+                      <th>异常</th>
+                      <th>日期</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recordsQuery.data.observations.map((o) => (
+                      <tr key={o.id}>
+                        <td>{o.displayName}</td>
+                        <td>{o.valueNum ?? o.valueText ?? ''}</td>
+                        <td>{o.unit ?? ''}</td>
+                        <td>
+                          {o.abnormalFlag === 'H'
+                            ? '偏高'
+                            : o.abnormalFlag === 'L'
+                              ? '偏低'
+                              : o.abnormalFlag === 'A'
+                                ? '异常'
+                                : ''}
+                        </td>
+                        <td>{o.occurredAt?.slice(0, 10)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </section>
+
+      {/* ④ 处理与版本历史 */}
+      <section className="panel">
+        <h3>④ 处理与版本历史</h3>
+        {settled && versionsQuery.isLoading && <p className="muted">加载中…</p>}
+        {settled && versionsQuery.data && (
+          <>
+            <h4 className="small">抽取草稿版本</h4>
+            <ul className="doc-versions__list">
+              {versionsQuery.data.drafts.map((d) => (
+                <li key={d.id}>
+                  v{d.version} · {d.parser} ·{' '}
+                  {d.confirmedAt
+                    ? `已确认 ${d.confirmedAt.slice(0, 10)}`
+                    : '未确认'}
+                </li>
+              ))}
+            </ul>
+            <h4 className="small">派生资产</h4>
+            <ul className="doc-versions__list">
+              {versionsQuery.data.assets.map((a) => (
+                <li key={a.id}>
+                  {a.role} v{a.version} · {a.generator}
+                  {a.stale ? ' ·（源已变化，待重生成）' : ''}
+                </li>
+              ))}
+              {versionsQuery.data.assets.length === 0 && (
+                <li className="muted">无派生资产</li>
+              )}
+            </ul>
+          </>
         )}
       </section>
     </div>

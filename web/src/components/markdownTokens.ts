@@ -48,6 +48,20 @@ export function isSafeHref(href: string): boolean {
 const MAX_NODES = 4000;
 
 /**
+ * 剥离副本中的机器锚点（`<!-- source:page=N -->` / `<!-- block:... -->`）。
+ *
+ * 这些注释是给"点击引用跳到对应页"用的定位标记，不是给人读的正文；
+ * 渲染前去掉，避免用户看到一串 HTML 注释。保留其余内容原样。
+ */
+export function stripSourceAnchors(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(/<!--\s*source:page=\d+\s*-->/g, '')
+    .replace(/<!--\s*block:[\w:.-]+\s*-->/g, '')
+    .replace(/\n{3,}/g, '\n\n');
+}
+
+/**
  * 裸 URL 正则：只匹配到"中文标点 / 空白 / 右括号"为止。
  *
  * 关键点：**不包含** `）` `。` `，` `；` `：` `！` `？` 等中文标点，

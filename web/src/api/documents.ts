@@ -7,6 +7,9 @@ import type {
   DocType,
   Document,
   DocumentAsset,
+  DocumentMarkdown,
+  DocumentRecords,
+  DocumentVersions,
   ExtractionJob,
   Page,
   TimePrecision,
@@ -161,6 +164,37 @@ export const documentsApi = {
           ...(version ? { version } : {}),
         },
       },
+    );
+    return data;
+  },
+
+  /** Markdown 副本正文（R1 T107 四区之一，走 API 通道避免 MinIO CORS）。 */
+  async markdown(
+    docId: string,
+    subjectId?: string,
+    version?: number,
+  ): Promise<DocumentMarkdown> {
+    const { data } = await client.get<DocumentMarkdown>(
+      `documents/${docId}/markdown`,
+      { params: { ...(subjectId ? { subjectId } : {}), ...(version ? { version } : {}) } },
+    );
+    return data;
+  },
+
+  /** 本文档已确认的结构化事实（R1 T107）。 */
+  async records(docId: string, subjectId?: string): Promise<DocumentRecords> {
+    const { data } = await client.get<DocumentRecords>(
+      `documents/${docId}/records`,
+      { params: subjectId ? { subjectId } : {} },
+    );
+    return data;
+  },
+
+  /** 处理与版本历史（R1 T107）。 */
+  async versions(docId: string, subjectId?: string): Promise<DocumentVersions> {
+    const { data } = await client.get<DocumentVersions>(
+      `documents/${docId}/versions`,
+      { params: subjectId ? { subjectId } : {} },
     );
     return data;
   },

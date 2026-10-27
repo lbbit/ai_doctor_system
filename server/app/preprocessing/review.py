@@ -154,6 +154,70 @@ def _parse_ref(v: str) -> tuple[str, int]:
     return kind, int(idx)
 
 
+def _supersede_previous_confirmations(
+    db: Session,
+    document: Document,
+    *,
+    current_draft_id: str,
+    account: Account,
+    request=None,
+) -> dict:
+    """确认新版本前，软删该文档旧的已确认事件/观测（R1 T106）。
+
+    调用时机：新确认的事件/观测**尚未写入**，因此此刻所有"当前有效"
+    （未软删）的、挂在本文档上的事件/观测都属于**上一版确认**。把它们软删
+    （保留行与审计），新确认的随后成为唯一有效事实。
+
+    为什么软删而非物理删：已确认事实是临床证据，必须可追溯（B-3/B-5）；
+    取代链通过 `deleted_at` + 审计表达，不抹历史。
+    """
+    now = datetime.now(timezone.utc)
+    old_events = list(
+        db.execute(
+            select(MedicalEvent).where(
+                MedicalEvent.document_id == document.id,
+                MedicalEvent.deleted_at.is_(None),
+            )
+        ).scalars()
+    )
+    old_obs = list(
+        db.execute(
+            select(Observation).where(
+                Observation.source_document_id == document.id,
+                Observation.deleted_at.is_(None),
+            )
+        ).scalars()
+    )
+    for ev in old_events:
+        ev.deleted_at = now
+    for ob in old_obs:
+        ob.deleted_at = now
+    if old_events or old_obs:
+        db.flush()
+        audit_record(
+            db,
+            action="record.supersede",
+            resource_type="document",
+            resource_id=document.id,
+            account_id=account.id,
+            subject_id=document.subject_id,
+            before={
+                "activeEventIds": [e.id for e in old_events],
+                "activeObservationIds": [o.id for o in old_obs],
+            },
+            after={
+                "supersededEvents": len(old_events),
+                "supersededObservations": len(old_obs),
+                "newDraftId": current_draft_id,
+            },
+            request=request,
+        )
+    return {
+        "events": len(old_events),
+        "observations": len(old_obs),
+    }
+
+
 def confirm_derived_record(
     db: Session,
     account: Account,
@@ -201,6 +265,13 @@ def confirm_derived_record(
     created_events: List[MedicalEvent] = []
     created_obs: List[Observation] = []
     applied_decisions: dict[str, dict] = {}
+
+    # ---- R1 T106：确认新版本前，原子取代旧的已确认事实 ----
+    # 同一文档"重新抽取 → 确认新版本"时，旧确认的事件/观测软删保留（审计可追溯），
+    # 新确认的成为当前有效事实。不静默改写、不撞幂等唯一约束。
+    superseded = _supersede_previous_confirmations(
+        db, document, current_draft_id=dr.id, account=account, request=request
+    )
 
     # ---- 事件决策 ----
     for i, ev_raw in enumerate(events):
@@ -352,6 +423,7 @@ def confirm_derived_record(
             "processingStatus": processing_of(document),
             "contentStatus": content_of(document),
             "reviewVersion": document.review_version,
+            "superseded": superseded,
             "eventIds": [e.id for e in created_events],
             "observationIds": [o.id for o in created_obs],
         },
@@ -374,6 +446,7 @@ def confirm_derived_record(
         "documentStatus": document.status,
         "processingStatus": processing_of(document),
         "contentStatus": content_of(document),
+        "superseded": superseded,
         "events": [_event_out(e) for e in created_events],
         "observations": [_obs_out(o) for o in created_obs],
         "auditId": audit.id,

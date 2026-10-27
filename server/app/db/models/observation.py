@@ -101,14 +101,18 @@ class Observation(Base):
     __table_args__ = (
         CheckConstraint("abnormal_flag IN ('N','L','H','A')",
                         name="ck_observations_abnormal_flag"),
-        # B-4 幂等：同一文档 + 同一字段来源不重复入库
+        # B-4 幂等：同一文档 + 同一字段来源不重复入库。
+        # R1 T106：加 deleted_at IS NULL → 重抽确认新版本时旧记录被软删（取代），
+        # 新记录同字段不再与历史软删行冲突（幂等仍对"当前有效"生效）。
         Index(
             "uq_obs_doc_field", "source_document_id", "source_field_ref", unique=True,
             postgresql_where=text(
-                "source_document_id IS NOT NULL AND source_field_ref IS NOT NULL"
+                "source_document_id IS NOT NULL AND source_field_ref IS NOT NULL "
+                "AND deleted_at IS NULL"
             ),
             sqlite_where=text(
-                "source_document_id IS NOT NULL AND source_field_ref IS NOT NULL"
+                "source_document_id IS NOT NULL AND source_field_ref IS NOT NULL "
+                "AND deleted_at IS NULL"
             ),
         ),
         Index("idx_obs_subject_code_time", "subject_id", "code", "occurred_at"),

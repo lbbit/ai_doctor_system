@@ -217,12 +217,22 @@ R3 可先基于结构化记录实现 `record_search/observation_series`，但“
 
 ### T106 重抽差异与确认版本不覆盖
 
+- **状态**：✅ 已完成（2026-10-26）
+- **实际落地**：确认新版本时 `_supersede_previous_confirmations()` 原子软删旧的已确认事件/观测（保留行+审计 `record.supersede`），新确认成为唯一有效事实；`uq_obs_doc_field` 改为带 `deleted_at IS NULL` 的部分唯一索引（迁移 `0011`），使取代链不被历史软删行阻塞。
+- **关键决策**：取代=软删保留（不物理删、不静默改写），符合 B-3/B-5；幂等仍对"当前有效"行生效；重抽后确认不再误报"已在其他页面处理"。
+- **测试**：`tests/api/test_review.py` 新增 2 例（取代不冲突 + 取代留审计）。
+
 - **代码**：`preprocessing/{pipeline,review}.py`、`db/models/preprocessing.py`。
 - 新草稿关联 `based_on_revision/source_asset_version`；确认后保留修订来源与 before/after。重抽只生成草稿，不更新已确认 Observation/Event。
 - **RED**：并发重抽/确认、重复确认、已确认后重抽、旧版本签名链接、字段拒绝、删除旧草稿不影响确认版。
 - 验收：现有幂等与版本保留测试不回归；前后差异可逐项接受。
 
 ### T107 文档详情四区与处理中心
+
+- **状态**：✅ 已完成（2026-10-26）
+- **实际落地**：详情页改为四区——**① 原件预览 ② Markdown 副本 ③ 结构化记录（已确认）④ 处理与版本历史**，外加"记录信息"元数据条（发生时间/精度/类型/机构）。新增三个只读端点：`GET /documents/{id}/markdown`（副本正文走 API 通道，避免 MinIO 直连 CORS 脆弱性）、`/records`（仅当前有效事实）、`/versions`（草稿+资产+最近任务）。前端新增 `stripSourceAnchors`（渲染前剥离机器锚点）。
+- **关键决策**：副本内容经服务端归属+生命周期校验后返回，不由前端直连对象存储；结构化区只列未软删的当前有效事实（重抽取代后旧版本不在此列）；无副本显示"尚未生成"而非报错。
+- **测试**：`tests/api/test_document_detail_sections.py`(6) + `web/tests/stripAnchors.test.ts`(5)。
 
 - **代码**：现有 `web/src/pages/{ArchivePage,DocumentDetailPage}.tsx`、`web/src/api/documents.ts`；新增 `web/src/components/documents/` 目录承载资产与版本组件（不是现有目录）。
 - 增加原件/Markdown/结构化/版本历史；独立状态和生命周期徽标；失败重试、取消、人工编辑、归档/恢复、索引状态。归档界面明确“从默认视图与检索隐藏，不移除原件”，若评审要求物理删除则另立项，不能以归档宣称永久删除已完成。
@@ -231,6 +241,12 @@ R3 可先基于结构化记录实现 `record_search/observation_series`，但“
 - 验收：桌面/移动浏览器完成上传→副本→确认→版本回看→归档恢复。
 
 ### T108 标准主数据完整性与 R1 出口对账
+
+- **状态**：✅ 已完成（2026-10-26）
+- **标准主数据现状（早前已达标，本轮核验）**：指标对齐链（归一化→模糊→AI 语义→单位统一→降级）、`match_kind`/`ai_alignment` 可追溯、禁止合并清单（`_PAIR_TRAITS`）、标本安全阀（镜检 vs 血液）、AI 新建准入（`is_plausible_indicator_name` + 噪声/页面元信息拦截）均已落地并有测试（`test_indicator_alignment`/`test_cross_hospital_alignment`/`test_indicator_names` 等）。机构/科室/药品的标准主数据留待 R3/R4 按需引入（当前 `facility/department` 为原文存储，不强行归一，避免过早建模）。
+- **出口对账（本轮新增）**：`server/scripts/reconcile_assets.py`——只读诊断（默认不写）：原件存在性抽样（缺失=红线）、派生副本 `source_hash` 新鲜度、孤儿/软删资产、已处理无副本缺口、草稿/确认/观测计数。红线判定：原件丢失 / 资产指向不存在文档 / 对账异常 → FAIL。
+- **测试**：`tests/unit/test_reconcile_assets.py`(5，离线纯函数）。
+- **真实环境对账**：需 compose 起栈后在 api 容器内跑（B-1 同源阻塞：本机 Docker 未运行，未执行）。
 
 - **代码**：现有 `preprocessing/{mapper,indicator_aligner,indicator_names,units}.py`，按类型新增机构/科室/药品主数据 service/model，不在 chat 内另建一套名称。
 - 指标继续标准名/单位/别名、AI 对齐留痕和禁止合并；药品区分通用名/成分/剂型/规格/商品名；机构/科室保留历史原文和别名。
